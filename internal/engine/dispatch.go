@@ -42,6 +42,17 @@ func (e *Engine) Handle(ctx context.Context, evt webhook.Event) error {
 	case "user.enabled":
 		// No-op locally; forward to bot as-is.
 		e.relayRaw(ctx, evt)
+	case "user.modified":
+		// Bedolaga bot's "докупка трафика" button PATCHes trafficLimitBytes,
+		// which fires user.modified (NOT user.traffic_reset). Without this
+		// branch, buying more traffic would not bring the whitelist squad back.
+		if err := e.onUserModified(ctx, evt.UserUUID, evt.Data); err != nil {
+			log.Error("user.modified handling failed", "err", err)
+			return err
+		}
+		// Forward the original modified event to the bot so it syncs its
+		// traffic_used_gb / traffic_limit_gb from the panel values.
+		e.relayRaw(ctx, evt)
 	case "user.disabled", "user.expired", "user.deleted":
 		log.Info("ignoring lifecycle event", "type", evt.Type)
 		// These are intentionally NOT forwarded: they reflect panel-level

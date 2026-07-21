@@ -20,9 +20,23 @@ type EventHandler interface {
 
 // Event is the normalized webhook event.
 type Event struct {
-	Type     string          // e.g. "user.limited", "user.traffic_reset"
+	Type     string          // e.g. "user.limited", "user.traffic_reset", "user.modified"
 	UserUUID string
 	Raw      json.RawMessage
+	// Data holds the structured view of the panel's `data` object. Fields are
+	// present only if the panel included them. Pointer-vs-nil distinguishes
+	// "panel did not send this field" from "panel sent 0/false/empty".
+	Data EventData
+}
+
+// EventData is the subset of panel payload fields the engine cares about.
+// All fields are pointers so handlers can distinguish "absent" from "zero".
+type EventData struct {
+	UUID              string  `json:"uuid,omitempty"`
+	Status            *string `json:"status,omitempty"`
+	TrafficLimitBytes *int64  `json:"trafficLimitBytes,omitempty"`
+	UsedTrafficBytes  *int64  `json:"usedTrafficBytes,omitempty"`
+	ExpireAt          *string `json:"expireAt,omitempty"`
 }
 
 // Handler serves POST /webhook.
@@ -105,7 +119,20 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Acknowledge immediately so the panel does not retry; process asynchronously.
 	w.WriteHeader(http.StatusOK)
 
-	evt := Event{Type: eventType, UserUUID: uuid, Raw: body}
+	// Parse the structured data fields the engine may need (e.g. the new
+	// trafficLimitBytes / usedTrafficBytes on a user.modified event). Missing
+	// fields stay nil so handlers can tell "panel didn't send it" apart from
+	// "panel sent zero".
+	var data EventData
+	if len(env.Data) > 0 {
+		_ = json.Unmarshal(env.Data, &data)
+	}
+	// Prefer the top-level uuid (already resolved) over data.uuid for consistency.
+	if data.UUID == "" {
+		data.UUID = uuid
+	}
+
+	evt := Event{Type: eventType, UserUUID: uuid, Raw: body, Data: data}
 	go func() {
 		// Detached context: webhook retries only fire on connection failure,
 		// so we must complete even if the original request is gone.
