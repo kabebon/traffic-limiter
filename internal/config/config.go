@@ -65,6 +65,21 @@ type Config struct {
 	// Empty = open (rely on network isolation / reverse proxy).
 	StateAPIToken string
 
+	// ---- Subscription proxy (Happ/INCY profile-title) ----
+
+	// SubproxyEnabled mounts /sub/ routes that proxy panel subscriptions and
+	// rewrite the profile-title header per-user based on wl_state. Clients
+	// (Happ/INCY/v2rayNG) should point at this service instead of the panel.
+	SubproxyEnabled bool
+
+	// SubproxyCacheTTL is how long a shortUuid→userUuid mapping is cached.
+	SubproxyCacheTTL time.Duration
+
+	// WLTitleActive is the profile-title shown when the whitelist is active.
+	WLTitleActive string
+	// WLTitleBlocked is the profile-title shown when whitelist is grace/blocked.
+	WLTitleBlocked string
+
 	// LogLevel is one of: debug, info, warn, error.
 	LogLevel string
 
@@ -95,6 +110,10 @@ func FromEnv() (Config, error) {
 		HTTPListen:               getenvDefault("HTTP_LISTEN", ":8080"),
 		AdminToken:               getenv("ADMIN_TOKEN"),
 		StateAPIToken:            getenv("STATE_API_TOKEN"),
+		SubproxyEnabled:          getBoolDefault("SUBPROXY_ENABLED", false),
+		SubproxyCacheTTL:         getDurationDefault("SUBPROXY_CACHE_TTL_SEC", 300) * time.Second,
+		WLTitleActive:            getenvDefault("WL_TITLE_ACTIVE", "VPN · whitelist active"),
+		WLTitleBlocked:           getenvDefault("WL_TITLE_BLOCKED", "⚠️ Whitelist exhausted · basic nodes work"),
 		LogLevel:                 getenvDefault("LOG_LEVEL", "info"),
 		ReconcileInterval:        getDurationDefault("RECONCILE_INTERVAL_SEC", 300) * time.Second,
 		HTTPTimeout:              getDurationDefault("HTTP_TIMEOUT_SEC", 15) * time.Second,
@@ -156,6 +175,20 @@ func getDurationDefault(key string, def time.Duration) time.Duration {
 		return def
 	}
 	return time.Duration(n)
+}
+
+func getBoolDefault(key string, def bool) bool {
+	v := os.Getenv(key)
+	if v == "" {
+		return def
+	}
+	switch strings.ToLower(v) {
+	case "1", "true", "yes", "on":
+		return true
+	case "0", "false", "no", "off":
+		return false
+	}
+	return def
 }
 
 func splitCSV(v string) []string {

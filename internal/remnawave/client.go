@@ -30,6 +30,39 @@ func New(baseURL, token string, timeout time.Duration) *Client {
 	}
 }
 
+// Token returns the API token (used by subproxy to forward auth to the panel
+// when proxying subscription requests).
+func (c *Client) Token() string { return c.token }
+
+// BaseURL returns the panel base URL.
+func (c *Client) BaseURL() string { return c.baseURL }
+
+// RawGet performs an authenticated GET and returns the raw response body.
+// Used by the subproxy resolver, which needs to inspect arbitrary JSON shapes
+// that the typed wrappers don't cover.
+func (c *Client) RawGet(ctx context.Context, path string) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+path, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	req.Header.Set("X-Api-Key", c.token)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("http GET %s: %w", path, err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return nil, fmt.Errorf("read body: %w", err)
+	}
+	if resp.StatusCode >= 400 {
+		return nil, &APIError{Status: resp.StatusCode, Path: path, Body: string(body)}
+	}
+	return body, nil
+}
+
 // do performs an authenticated request and decodes JSON into out (if non-nil).
 func (c *Client) do(ctx context.Context, method, path string, body any, out any) error {
 	var reader io.Reader

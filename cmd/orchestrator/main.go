@@ -23,6 +23,7 @@ import (
 	"github.com/traffic-limiter/internal/poller"
 	"github.com/traffic-limiter/internal/remnawave"
 	"github.com/traffic-limiter/internal/state"
+	"github.com/traffic-limiter/internal/subproxy"
 	"github.com/traffic-limiter/internal/webhook"
 )
 
@@ -83,6 +84,16 @@ func main() {
 		relay = botrelay.New(cfg.BotWebhookURL, cfg.BotWebhookSecret, cfg.HTTPTimeout, log)
 		eng.SetRelay(relay)
 		log.Info("bot relay enabled", "url", cfg.BotWebhookURL)
+	}
+
+	// Optional: subscription proxy that rewrites profile-title per-user.
+	// Clients (Happ/INCY/v2rayNG) should point at this service's /sub/... URL
+	// instead of the panel. Disabled unless SUBPROXY_ENABLED=true.
+	if cfg.SubproxyEnabled {
+		sp := subproxy.New(cfg, client, store, log)
+		mux.Handle("/sub/", sp)
+		log.Info("subscription proxy enabled",
+			"title_active", cfg.WLTitleActive, "title_blocked", cfg.WLTitleBlocked)
 	}
 
 	srv := &http.Server{

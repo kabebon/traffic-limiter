@@ -219,9 +219,59 @@ internal/
   engine/                decision logic, per-user lock, handlers, bot-relay glue
   botrelay/              опциональный форвард событий в бот (HMAC-signed)
   poller/                cron-опрос статистики basic-нод
+  subproxy/              опциональный прокси подписок с подменой profile-title
 deployments/             docker-compose
 Dockerfile               multi-stage, CGO_ENABLED=0
 ```
+
+---
+
+## Подписочный прокси: надпись в шапке Happ / INCY
+
+Все современные клиенты (Happ, INCY, v2rayNG, Karing) читают из подписки заголовок `profile-title` и показывают его в шапке приложения. Сервис умеет **подменять этот заголовок per-user** в зависимости от состояния whitelist:
+
+- `wl_state = active` → `🟢 VPN · whitelist active`
+- `wl_state = grace/blocked` → `⚠️ Whitelist exhausted · basic nodes work`
+
+Тексты задаются через env `WL_TITLE_ACTIVE` / `WL_TITLE_BLOCKED` (emoji и кириллица поддерживаются — сервис URL-кодирует значение так, как ожидают клиенты).
+
+### Как это работает
+
+```
+Happ/INCY ──GET──► /sub/{shortUuid}[/...]   (на traffic-limiter, не на панель)
+                      │
+                      ├─ проксирует запрос на панель /api/sub/{short}[...]
+                      ├─ резолвит shortUuid → userUuid через /api/sub/{short}/info (с кэшем)
+                      ├─ читает wl_state из SQLite
+                      └─ перезаписывает Profile-Title и отдаёт тело подписки
+```
+
+> ⚠️ **Важно про ограничения клиентов.** Произвольный большой текст в шапке показать нельзя: `profile-title` — это **одна строка**. Счётчики `used/total` клиенты берут из стандартного `subscription-userinfo` (его панель отдаёт, мы не трогаем). Длинные «анонсы» поддерживают только Clash-семейство (через `Announce` в теле), но не Happ/INCY.
+
+### Включение
+
+1. В `.env`:
+   ```
+   SUBPROXY_ENABLED=true
+   WL_TITLE_ACTIVE=🟢 VPN · whitelist active
+   WL_TITLE_BLOCKED=⚠️ Whitelist exhausted · basic nodes work
+   SUBPROXY_CACHE_TTL_SEC=300
+   ```
+2. У клиентов (через бот/миниапп) URL подписки меняется с
+   `https://panel.example.com/api/sub/{shortUuid}` на
+   `https://traffic-limiter.example.com/sub/{shortUuid}`.
+3. Reverse-proxy перед traffic-limiter должен терминировать HTTPS на том же хосте, где отдаётся `/sub/`.
+
+### Производительность
+
+Каждый pull подписки → 1 запрос к панели (`/api/sub/{short}/info`) + 1 запрос на само тело (`/api/sub/{short}`). Чтобы не бить панель, короткий UUID → UUID пользователя кэшируется на `SUBPROXY_CACHE_TTL_SEC` (по умолчанию 5 минут). Холодный старт — первые минуты после рестарта — каждый pull стоит +1 запроса к панели; клиенты это не замечают (тело отдаётся в любом случае).
+
+### Тест-план для прокси
+
+1. `SUBPROXY_ENABLED=true`, юзер с `wl_state=active`. `curl -i https://tl/sub/{short}` → `Profile-Title: 🟢%20VPN%20...`.
+2. Юзер исчерпал whitelist, сервис перевёл его в `blocked`. Тот же curl → `Profile-Title: ⚠️%20Whitelist%20exhausted...`.
+3. В самом приложении Happ/INCY после обновления подписки — в шапке видно соответствующий текст.
+4. Несуществующий shortUuid → панель вернёт 404, прокси проксирует его как есть + дефолтный title (active).
 
 ---
 
