@@ -1,0 +1,23 @@
+# Binaries
+/orchestrator
+/bin/
+/dist/
+
+# Local env / data
+.env
+data/
+*.sqlite
+*.sqlite-*
+
+# Bedolaga bot reference — separate project, NOT part of this repo.
+remnawave-bedolaga-telegram-bot-main/
+remnawave-bedolaga-telegram-bot/
+
+# Editor
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db

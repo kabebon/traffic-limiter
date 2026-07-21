@@ -1,0 +1,27 @@
+services:
+  traffic-limiter:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: traffic-limiter:latest
+    container_name: traffic-limiter
+    restart: unless-stopped
+    env_file:
+      - ../.env
+    volumes:
+      - tl-data:/data
+    networks:
+      - remnawave-net
+    # If the panel runs on the same host, publish the webhook port behind your
+    # reverse proxy. Otherwise expose it directly.
+    ports:
+      - "127.0.0.1:8088:8080"
+
+volumes:
+  tl-data:
+
+networks:
+  remnawave-net:
+    external: true
+    # If you don't have an external panel network, switch to:
+    # name: remnawave-net
