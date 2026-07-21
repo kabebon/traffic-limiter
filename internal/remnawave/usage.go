@@ -16,8 +16,8 @@ import (
 // The response shape is { response: { users: [ { uuid/username, usedTrafficBytes } ] } }
 // (we accept a few field-name variants since the panel renames these occasionally).
 func (c *Client) NodeUsage(ctx context.Context, nodeUUID string, from, to time.Time) ([]NodeUsageEntry, error) {
-	path := fmt.Sprintf("/api/bandwidth-stats/nodes/%s/users?start=%d&end=%d&topUsersLimit=1000",
-		nodeUUID, from.UnixMilli(), to.UnixMilli())
+	path := fmt.Sprintf("/api/bandwidth-stats/nodes/%s/users?start=%s&end=%s&topUsersLimit=1000",
+		nodeUUID, from.Format(time.DateOnly), to.Format(time.DateOnly))
 
 	var raw json.RawMessage
 	if err := c.do(ctx, http.MethodGet, path, nil, &raw); err != nil {
@@ -82,7 +82,24 @@ func parseNodeUsage(raw json.RawMessage) ([]NodeUsageEntry, error) {
 		}
 	}
 
-	// 3) Try: bare array.
+	// 3) Try: object with "topUsers" array (newest panel shape).
+	var topUsersWrapper struct {
+		TopUsers []struct {
+			Username string `json:"username"`
+			Total    int64  `json:"total"`
+		} `json:"topUsers"`
+	}
+	if err := json.Unmarshal(body, &topUsersWrapper); err == nil && len(topUsersWrapper.TopUsers) > 0 {
+		out := make([]NodeUsageEntry, 0, len(topUsersWrapper.TopUsers))
+		for _, e := range topUsersWrapper.TopUsers {
+			out = append(out, NodeUsageEntry{UserUUID: e.Username, Bytes: e.Total})
+		}
+		if len(out) > 0 {
+			return out, nil
+		}
+	}
+
+	// 4) Try: bare array.
 	var arr []struct {
 		UUID       string `json:"uuid"`
 		UserUUID   string `json:"userUuid"`
@@ -110,7 +127,7 @@ func parseNodeUsage(raw json.RawMessage) ([]NodeUsageEntry, error) {
 		}
 	}
 
-	// 4) Unknown shape: surface raw snippet for diagnostics.
+	// 5) Unknown shape: surface raw snippet for diagnostics.
 	snippet := string(body)
 	if len(snippet) > 256 {
 		snippet = snippet[:256]

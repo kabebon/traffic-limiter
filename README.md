@@ -91,8 +91,19 @@
 ```bash
 cp .env.example .env
 # заполните обязательные переменные (без BOT_WEBHOOK_URL)
+
+# Создайте папку для базы данных и выдайте права (чтобы не было проблем с permission denied)
+mkdir -p data
+chown 65532:65532 data
+
 docker compose -f deployments/docker-compose.yml up -d --build
 ```
+
+> **Совет по безопасности (общение внутри локальной сети Docker)**:
+> Если панель развернута на этом же сервере, лучше настроить их общение по локальной сети, чтобы не гонять трафик через внешний IP.
+> 1. Узнайте точное имя сети вашей панели с помощью команды: `docker network ls` (обычно это `remnawave_default` или `remnawave-main_default`).
+> 2. Откройте `deployments/docker-compose.yml`, в самом низу удалите строку `external: true` и раскомментируйте `name: remnawave_default` (подставив имя вашей сети).
+> 3. Теперь в `.env` вы можете указать `REMNAWAVE_PANEL_URL=http://remnawave:3000` (без `/api` на конце).
 
 Проверка: `curl http://localhost:8088/healthz` → `ok`.
 

@@ -9,16 +9,13 @@ services:
     env_file:
       - ../.env
     volumes:
-      - tl-data:/data
+      - ../data:/data
     networks:
       - remnawave-net
     # If the panel runs on the same host, publish the webhook port behind your
     # reverse proxy. Otherwise expose it directly.
     ports:
       - "127.0.0.1:8088:8080"
-
-volumes:
-  tl-data:
 
 networks:
   remnawave-net:
