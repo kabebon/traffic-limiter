@@ -36,11 +36,16 @@ type Proxy struct {
 	log       *slog.Logger
 	titleOn   string // shown when wl_state == active
 	titleOff  string // shown when wl_state == grace/blocked
+	titleExp  string // shown when the subscription is expired by date
 	panelBase string // base URL, e.g. https://panel.example.com
 	http      *http.Client
+	// failover is the single server link served to users whose subscription
+	// is expired by date (panel status EXPIRED), so they can still reach the
+	// cabinet to renew. Empty disables the failover branch.
+	failover string
 }
 
-// New builds a proxy. titleOn/titleOff are the two profile-title strings.
+// New builds a proxy. titleOn/titleOff/titleExp are the profile-title strings.
 func New(cfg config.Config, client *remnawave.Client, store *state.Store, log *slog.Logger) *Proxy {
 	return &Proxy{
 		client:    client,
@@ -49,6 +54,8 @@ func New(cfg config.Config, client *remnawave.Client, store *state.Store, log *s
 		log:       log,
 		titleOn:   cfg.WLTitleActive,
 		titleOff:  cfg.WLTitleBlocked,
+		titleExp:  cfg.WLTitleExpired,
+		failover:  cfg.FailoverConfig,
 		panelBase: strings.TrimRight(cfg.PanelURL, "/"),
 		http:      &http.Client{Timeout: cfg.HTTPTimeout},
 	}
@@ -69,6 +76,19 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if !strings.HasPrefix(r.URL.Path, "/sub/") {
 		http.NotFound(w, r)
 		return
+	}
+
+	// Failover branch: if the subscription is expired by date (panel status
+	// EXPIRED), serve a single rescue server so the user can open the cabinet
+	// and renew. We do NOT proxy the panel here — an expired subscription has
+	// no usable nodes to serve. This is deliberately distinct from a whitelist
+	// quota exhaustion (which keeps basic nodes and is handled below).
+	if p.failover != "" {
+		short := extractShortUUID(r.URL.Path)
+		if _, status, ok := p.resolver.ResolveWithStatus(r.Context(), short); ok && isExpiredStatus(status) {
+			p.serveFailover(w)
+			return
+		}
 	}
 
 	panelURL := p.panelBase + "/api" + r.URL.Path
@@ -125,10 +145,13 @@ func (p *Proxy) titleForShort(ctx context.Context, short string) string {
 	if short == "" {
 		return p.titleOn
 	}
-	userUUID, ok := p.resolver.Resolve(ctx, short)
+	userUUID, status, ok := p.resolver.ResolveWithStatus(ctx, short)
 	if !ok {
 		// Unknown / new user — show active title (panel default).
 		return p.titleOn
+	}
+	if isExpiredStatus(status) {
+		return p.titleExp
 	}
 	st, _ := p.store.Get(ctx, userUUID, 0)
 	if st == nil {
@@ -158,5 +181,36 @@ func sanitizeRequestHeaders(h http.Header) {
 		"Host", "Content-Length",
 	} {
 		h.Del(k)
+	}
+}
+
+// serveFailover responds with the rescue server link for an expired-by-date
+// subscription. The body is a plain-text list (Happ/INCY/v2rayNG accept plain
+// as well as base64), with a profile-title that tells the user to renew. We
+// deliberately omit Subscription-Userinfo — the subscription is expired, there
+// is no quota to report.
+func (p *Proxy) serveFailover(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	if p.titleExp != "" {
+		w.Header().Set("Profile-Title", percentEncode(p.titleExp))
+	}
+	w.Header().Set("Profile-Update-Interval", "24")
+	w.WriteHeader(http.StatusOK)
+	_, _ = io.WriteString(w, p.failover)
+	if !strings.HasSuffix(p.failover, "\n") {
+		_, _ = io.WriteString(w, "\n")
+	}
+}
+
+// isExpiredStatus reports whether the panel-side status means the subscription
+// is expired by date and should be served the failover server. An empty status
+// (unknown / fetch error) returns false so we never fail-closed into rescue
+// mode for a user who might still be active.
+func isExpiredStatus(status string) bool {
+	switch status {
+	case string(remnawave.StatusExpired):
+		return true
+	default:
+		return false
 	}
 }

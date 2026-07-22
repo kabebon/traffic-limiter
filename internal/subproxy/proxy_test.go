@@ -129,3 +129,117 @@ func TestProxy_RejectsNonSubPath(t *testing.T) {
 		t.Fatalf("want 404 for non-/sub/ path, got %d", rec.Code)
 	}
 }
+
+// startMockPanelWithStatus extends startMockPanel to also answer
+// GET /api/users/{uuid} with a given status, which the resolver's status
+// lookup (ResolveWithStatus → GetUser) needs.
+func startMockPanelWithStatus(t *testing.T, userUUID, status string) *httptest.Server {
+	t.Helper()
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("/api/sub/", func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/info") {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprintf(w,
+				`{"response":{"isFound":true,"user":{"uuid":%q}}}`, userUUID)
+			return
+		}
+		w.Header().Set("Content-Type", "text/plain")
+		w.Header().Set("Profile-Title", "original-panel-title")
+		_, _ = w.Write([]byte("# subscription body\nvless://should-not-appear\n"))
+	})
+
+	mux.HandleFunc("/api/users/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w,
+			`{"response":{"uuid":%q,"status":%q,"userTraffic":{"usedTrafficBytes":0}}}`,
+			userUUID, status)
+	})
+
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// TestProxy_FailoverOnExpired verifies that an expired-by-date subscription
+// (panel status EXPIRED) is served the single failover server instead of the
+// panel body, with the expired profile-title, and that the panel subscription
+// endpoint is NOT hit.
+func TestProxy_FailoverOnExpired(t *testing.T) {
+	dir := t.TempDir()
+	store, err := state.Open(dir + "/test.sqlite")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	userUUID := "u-expired"
+	mockPanel := startMockPanelWithStatus(t, userUUID, "EXPIRED")
+	client := remnawave.New(mockPanel.URL, "tok", 5*time.Second)
+
+	failover := "vless://rescue@example.com:443?encryption=none#RESCUE"
+	cfg := config.Config{
+		PanelURL:         mockPanel.URL,
+		WLTitleActive:    "ACTIVE",
+		WLTitleBlocked:   "BLOCKED",
+		WLTitleExpired:   "EXPIRED-TITLE",
+		FailoverConfig:   failover,
+		SubproxyCacheTTL: 60 * time.Second,
+	}
+	p := New(cfg, client, store, nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/sub/shortexp", nil)
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d", rec.Code)
+	}
+	if got := rec.Header().Get("Profile-Title"); got != "EXPIRED-TITLE" {
+		t.Fatalf("Profile-Title = %q, want %q", got, "EXPIRED-TITLE")
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, failover) {
+		t.Fatalf("body should contain the failover server, got %q", body)
+	}
+	if strings.Contains(body, "should-not-appear") {
+		t.Fatalf("body must not contain the panel subscription body, got %q", body)
+	}
+}
+
+// TestProxy_NoFailoverOnActive verifies that an active subscription is NOT
+// served the failover server — it must be proxied through to the panel.
+func TestProxy_NoFailoverOnActive(t *testing.T) {
+	dir := t.TempDir()
+	store, _ := state.Open(dir + "/test.sqlite")
+	defer store.Close()
+
+	userUUID := "u-active2"
+	mockPanel := startMockPanelWithStatus(t, userUUID, "ACTIVE")
+	client := remnawave.New(mockPanel.URL, "tok", 5*time.Second)
+
+	cfg := config.Config{
+		PanelURL:         mockPanel.URL,
+		WLTitleActive:    "ACTIVE",
+		WLTitleBlocked:   "BLOCKED",
+		WLTitleExpired:   "EXPIRED-TITLE",
+		FailoverConfig:   "vless://rescue@example.com:443#RESCUE",
+		SubproxyCacheTTL: 60 * time.Second,
+	}
+	p := New(cfg, client, store, nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/sub/shortact", nil)
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d", rec.Code)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "should-not-appear") {
+		t.Fatalf("active user should get the proxied panel body, got %q", body)
+	}
+	if strings.Contains(body, "rescue") {
+		t.Fatalf("active user must NOT get the failover server, got %q", body)
+	}
+}

@@ -3,6 +3,7 @@ package subproxy
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"log/slog"
 	"net/http"
 	"sync"
@@ -18,24 +19,39 @@ import (
 // We do not persist the cache: it warms up within minutes of normal operation
 // (clients pull subscriptions frequently) and is just an optimization — a cold
 // cache miss costs one extra panel call.
+//
+// The cache also holds the panel-side user status (ACTIVE/LIMITED/EXPIRED/...)
+// under a separate TTL. Status changes far less often than subscription pulls
+// happen, and the failover branch needs it to tell "subscription expired by
+// date" apart from "whitelist quota exhausted" (the latter keeps basic nodes).
 type Resolver struct {
 	client *remnawave.Client
 	store  *state.Store
 	log    *slog.Logger
 	ttl    time.Duration
 
-	mu     sync.RWMutex
+	mu      sync.RWMutex
 	byShort map[string]cacheEntry
 }
 
 type cacheEntry struct {
 	userUUID string
 	expires  time.Time
+	// status is the panel-side user status, refreshed independently of the
+	// uuid mapping. statusExpires may be zero (never fetched); an empty status
+	// means "unknown" (treated as not-expired by the caller).
+	status        string
+	statusExpires time.Time
 }
 
 // NewResolver builds a resolver. ttl controls how long a short→user mapping is
-// considered fresh; 0 disables caching (every lookup hits the panel).
+// considered fresh; 0 disables caching (every lookup hits the panel). A nil log
+// is replaced with a discard logger so callers (notably tests) don't need to
+// supply one.
 func NewResolver(client *remnawave.Client, store *state.Store, log *slog.Logger, ttl time.Duration) *Resolver {
+	if log == nil {
+		log = slog.New(slog.NewTextHandler(io.Discard, nil))
+	}
 	return &Resolver{
 		client:  client,
 		store:   store,
@@ -64,6 +80,39 @@ func (r *Resolver) Resolve(ctx context.Context, short string) (string, bool) {
 	return uuid, true
 }
 
+// ResolveWithStatus returns the userUuid and its current panel status for a
+// shortUuid. The uuid is cached like Resolve; the status is fetched via
+// GetUser and cached under its own TTL so we don't hit the panel on every pull.
+//
+// ok=false means the panel did not have the subscription (404) or the request
+// failed. When ok=true but status=="" the status could not be determined
+// (panel error); callers must treat that as "not expired" (fail-safe).
+func (r *Resolver) ResolveWithStatus(ctx context.Context, short string) (string, string, bool) {
+	if short == "" {
+		return "", "", false
+	}
+
+	// Fast path: uuid mapping fresh AND status fresh.
+	if uuid, status, hit := r.cacheGetWithStatus(short); hit {
+		return uuid, status, true
+	}
+
+	// Resolve the uuid first (may be a warm cache hit or a panel fetch).
+	uuid, ok := r.cacheGet(short)
+	if !ok {
+		uuid, ok = r.fetchFromPanel(ctx, short)
+		if !ok {
+			return "", "", false
+		}
+		r.cachePut(short, uuid)
+	}
+
+	// Fetch status only when the cached one is stale.
+	status := r.fetchStatus(ctx, uuid)
+	r.cachePutStatus(short, status)
+	return uuid, status, true
+}
+
 func (r *Resolver) fetchFromPanel(ctx context.Context, short string) (string, bool) {
 	// /api/sub/{short}/info returns { response: { isFound, user: {...} } }
 	// where `user` contains the full user object including `uuid`. Field shape
@@ -87,6 +136,17 @@ func (r *Resolver) fetchFromPanel(ctx context.Context, short string) (string, bo
 		return "", false
 	}
 	return uuid, true
+}
+
+// fetchStatus loads the panel-side user status. Returns "" on any failure
+// (caller treats unknown as not-expired).
+func (r *Resolver) fetchStatus(ctx context.Context, userUUID string) string {
+	panel, err := r.client.GetUser(ctx, userUUID)
+	if err != nil || panel == nil {
+		r.log.Debug("resolver: status fetch failed", "user", userUUID, "err", err)
+		return ""
+	}
+	return string(panel.Status)
 }
 
 // probeUserUUID tries multiple JSON paths for the user UUID, covering several
@@ -137,24 +197,52 @@ func (r *Resolver) cacheGet(short string) (string, bool) {
 	return e.userUUID, true
 }
 
+// cacheGetWithStatus returns the uuid and status if BOTH are still fresh.
+// The third return is true only when a panel round-trip can be skipped
+// entirely (uuid fresh AND status fresh).
+func (r *Resolver) cacheGetWithStatus(short string) (string, string, bool) {
+	if r.ttl == 0 {
+		return "", "", false
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	e, ok := r.byShort[short]
+	if !ok || time.Now().After(e.expires) {
+		return "", "", false
+	}
+	if !e.statusExpires.IsZero() && time.Now().Before(e.statusExpires) {
+		return e.userUUID, e.status, true
+	}
+	return "", "", false
+}
+
 func (r *Resolver) cachePut(short, userUUID string) {
 	if r.ttl == 0 {
 		return
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	// Bound the cache size to avoid unbounded growth under abuse; drop a random
-	// entry when very large (simple eviction, fine for a few thousand users).
-	if len(r.byShort) > 100_000 {
-		for k := range r.byShort {
-			delete(r.byShort, k)
-			break
-		}
+	e := r.byShort[short]
+	e.userUUID = userUUID
+	e.expires = time.Now().Add(r.ttl)
+	r.byShort[short] = e
+}
+
+// cachePutStatus updates only the status of an existing entry (creating one is
+// not useful without a uuid, so a missing entry is left alone).
+func (r *Resolver) cachePutStatus(short, status string) {
+	if r.ttl == 0 {
+		return
 	}
-	r.byShort[short] = cacheEntry{
-		userUUID: userUUID,
-		expires:  time.Now().Add(r.ttl),
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	e, ok := r.byShort[short]
+	if !ok {
+		return
 	}
+	e.status = status
+	e.statusExpires = time.Now().Add(r.ttl)
+	r.byShort[short] = e
 }
 
 // keep net/http referenced (used by callers expecting an http.Client down the line)

@@ -79,6 +79,16 @@ type Config struct {
 	WLTitleActive string
 	// WLTitleBlocked is the profile-title shown when whitelist is grace/blocked.
 	WLTitleBlocked string
+	// WLTitleExpired is the profile-title shown when the subscription is expired
+	// by date (panel status EXPIRED). In that case the subproxy serves the
+	// FailoverConfig instead of the panel subscription, so the user can still
+	// reach the cabinet to renew.
+	WLTitleExpired string
+
+	// FailoverConfig is a single vless:// (or other supported scheme) link
+	// served to users whose subscription is expired by date. Empty disables
+	// the failover branch (expired users get whatever the panel returns).
+	FailoverConfig string
 
 	// LogLevel is one of: debug, info, warn, error.
 	LogLevel string
@@ -114,6 +124,8 @@ func FromEnv() (Config, error) {
 		SubproxyCacheTTL:         getDurationDefault("SUBPROXY_CACHE_TTL_SEC", 300) * time.Second,
 		WLTitleActive:            getenvDefault("WL_TITLE_ACTIVE", "VPN · whitelist active"),
 		WLTitleBlocked:           getenvDefault("WL_TITLE_BLOCKED", "⚠️ Whitelist exhausted · basic nodes work"),
+		WLTitleExpired:           getenvDefault("WL_TITLE_EXPIRED", "🔴 Subscription expired · renew in cabinet"),
+		FailoverConfig:           getenv("FAILOVER_CONFIG"),
 		LogLevel:                 getenvDefault("LOG_LEVEL", "info"),
 		ReconcileInterval:        getDurationDefault("RECONCILE_INTERVAL_SEC", 300) * time.Second,
 		HTTPTimeout:              getDurationDefault("HTTP_TIMEOUT_SEC", 15) * time.Second,
