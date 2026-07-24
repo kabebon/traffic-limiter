@@ -1,6 +1,10 @@
 package subproxy
 
-import "testing"
+import (
+	"encoding/base64"
+	"strings"
+	"testing"
+)
 
 func TestExtractShortUUID(t *testing.T) {
 	cases := []struct {
@@ -43,5 +47,20 @@ func TestPercentEncode(t *testing.T) {
 				t.Fatalf("percentEncode(%q) = %q, want %q", tc.in, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestBase64Title(t *testing.T) {
+	// Must be prefixed with "base64:" and decode back to the input.
+	got := base64Title("KabebaVPN 🦉")
+	if !strings.HasPrefix(got, "base64:") {
+		t.Fatalf("base64Title must be prefixed with base64:, got %q", got)
+	}
+	dec, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(got, "base64:"))
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if string(dec) != "KabebaVPN 🦉" {
+		t.Fatalf("decoded = %q, want %q", string(dec), "KabebaVPN 🦉")
 	}
 }

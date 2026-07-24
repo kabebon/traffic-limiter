@@ -145,9 +145,8 @@ func TestProxy_RejectsNonSubPath(t *testing.T) {
 }
 
 // TestProxy_FailoverOnExpired verifies that a subscription whose expire=
-// timestamp is in the past is served the single rescue server instead of the
-// panel body, with the expired profile-title, and that the panel body is NOT
-// returned.
+// timestamp is in the past is served the rescue server (preceded by the status
+// message lines) instead of the panel body, with the expired profile-title.
 func TestProxy_FailoverOnExpired(t *testing.T) {
 	dir := t.TempDir()
 	store, err := state.Open(dir + "/test.sqlite")
@@ -168,6 +167,8 @@ func TestProxy_FailoverOnExpired(t *testing.T) {
 		WLTitleBlocked:   "BLOCKED",
 		WLTitleExpired:   "EXPIRED-TITLE",
 		FailoverConfig:   failover,
+		FailoverMessages: []string{"Подписка истекла", "Свяжитесь с поддержкой"},
+		FailoverTitle:    "Brand",
 		SubproxyCacheTTL: 60 * time.Second,
 	}
 	p := New(cfg, client, store, nil)
@@ -179,13 +180,20 @@ func TestProxy_FailoverOnExpired(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("want 200, got %d", rec.Code)
 	}
-	if got := rec.Header().Get("Profile-Title"); got != "EXPIRED-TITLE" {
-		t.Fatalf("Profile-Title = %q, want %q", got, "EXPIRED-TITLE")
+	// Title should be base64-encoded (the format clients render cleanly).
+	if got := rec.Header().Get("Profile-Title"); !strings.HasPrefix(got, "base64:") {
+		t.Fatalf("Profile-Title = %q, want a base64:-prefixed value", got)
 	}
 	body := rec.Body.String()
+	// Each message renders as a fake server line.
+	if !strings.Contains(body, "#%D0%9F%D0%BE%D0%B4%D0%BF%D0%B8%D1%81%D0%BA%D0%B0") {
+		t.Fatalf("body should contain the first message line, got %q", body)
+	}
+	// The real rescue server is appended last.
 	if !strings.Contains(body, failover) {
 		t.Fatalf("body should contain the failover server, got %q", body)
 	}
+	// The panel body must NOT leak through.
 	if strings.Contains(body, "should-not-appear") {
 		t.Fatalf("body must not contain the panel subscription body, got %q", body)
 	}

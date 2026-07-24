@@ -1,6 +1,7 @@
 package subproxy
 
 import (
+	"encoding/base64"
 	"net/url"
 	"strings"
 )
@@ -41,4 +42,11 @@ func percentEncode(s string) string {
 	// literally. PathEscape keeps spaces as %20 and is closer to what
 	// these clients expect for the profile-title header.
 	return url.PathEscape(s)
+}
+
+// base64Title encodes a profile-title the way the Remnawave panel does —
+// base64 with a "base64:" prefix. Happ/INCY/v2rayNG render this cleanly,
+// whereas raw percent-encoding shows up as mojibake in some clients.
+func base64Title(s string) string {
+	return "base64:" + base64.StdEncoding.EncodeToString([]byte(s))
 }

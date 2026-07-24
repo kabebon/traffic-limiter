@@ -26,6 +26,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -50,21 +51,27 @@ type Proxy struct {
 	// is expired by date (panel status EXPIRED), so they can still reach the
 	// cabinet to renew. Empty disables the failover branch.
 	failover string
+	// failoverMessages are rendered as fake "servers" before the rescue link.
+	failoverMessages []string
+	// failoverTitle is the branded Profile-Title for the rescue response.
+	failoverTitle string
 }
 
 // New builds a proxy. titleOn/titleOff/titleExp are the profile-title strings.
 func New(cfg config.Config, client *remnawave.Client, store *state.Store, log *slog.Logger) *Proxy {
 	return &Proxy{
-		client:    client,
-		store:     store,
-		resolver:  NewResolver(client, store, log, cfg.SubproxyCacheTTL),
-		log:       log,
-		titleOn:   cfg.WLTitleActive,
-		titleOff:  cfg.WLTitleBlocked,
-		titleExp:  cfg.WLTitleExpired,
-		failover:  cfg.FailoverConfig,
-		panelBase: strings.TrimRight(cfg.PanelURL, "/"),
-		http:      &http.Client{Timeout: cfg.HTTPTimeout},
+		client:           client,
+		store:            store,
+		resolver:         NewResolver(client, store, log, cfg.SubproxyCacheTTL),
+		log:              log,
+		titleOn:          cfg.WLTitleActive,
+		titleOff:         cfg.WLTitleBlocked,
+		titleExp:         cfg.WLTitleExpired,
+		failover:         cfg.FailoverConfig,
+		failoverMessages: cfg.FailoverMessages,
+		failoverTitle:    cfg.FailoverTitle,
+		panelBase:        strings.TrimRight(cfg.PanelURL, "/"),
+		http:             &http.Client{Timeout: cfg.HTTPTimeout},
 	}
 }
 
@@ -193,18 +200,34 @@ func sanitizeRequestHeaders(h http.Header) {
 	}
 }
 
-// serveFailover responds with the rescue server link for an expired-by-date
-// subscription. The body is a plain-text list (Happ/INCY/v2rayNG accept plain
-// as well as base64), with a profile-title that tells the user to renew. We
-// deliberately omit Subscription-Userinfo — the subscription is expired, there
-// is no quota to report.
+// serveFailover responds to an expired-by-date subscription with a readable
+// status block followed by the rescue server.
+//
+// The body mirrors how the panel itself renders placeholder lines: each status
+// message becomes a fake "server" (vless://…@0.0.0.0:1?#message) so the user
+// sees the text as a server name in Happ/INCY/v2rayNG. The real rescue server
+// (FAILOVER_CONFIG) is appended last and is the only connectable entry.
+//
+// The profile-title is base64-encoded with the "base64:" prefix that the panel
+// uses — Happ/INCY render this cleanly (raw percent-encoding shows up as
+// mojibake in some clients).
 func (p *Proxy) serveFailover(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	if p.titleExp != "" {
-		w.Header().Set("Profile-Title", percentEncode(p.titleExp))
+		w.Header().Set("Profile-Title", base64Title(p.titleExp))
+	} else if p.failoverTitle != "" {
+		w.Header().Set("Profile-Title", base64Title(p.failoverTitle))
 	}
 	w.Header().Set("Profile-Update-Interval", "24")
 	w.WriteHeader(http.StatusOK)
+
+	for _, msg := range p.failoverMessages {
+		// Fake server: unreachable host + the message as the server name.
+		_, _ = io.WriteString(w, "vless://00000000-0000-0000-0000-000000000000@0.0.0.0:1?")
+		_, _ = io.WriteString(w, "encryption=none&type=tcp&security=none#")
+		_, _ = io.WriteString(w, url.PathEscape(msg))
+		_, _ = io.WriteString(w, "\n")
+	}
 	_, _ = io.WriteString(w, p.failover)
 	if !strings.HasSuffix(p.failover, "\n") {
 		_, _ = io.WriteString(w, "\n")

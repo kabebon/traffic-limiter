@@ -90,6 +90,17 @@ type Config struct {
 	// the failover branch (expired users get whatever the panel returns).
 	FailoverConfig string
 
+	// FailoverMessages are shown to expired-by-date users as fake "servers"
+	// (mirroring how the panel itself renders placeholder lines) so the user
+	// sees a readable status in their client before the rescue server. Each
+	// entry becomes one line in the subscription body. Pipe-separated in env.
+	FailoverMessages []string
+
+	// FailoverTitle is the Profile-Title shown to expired-by-date users, in
+	// addition to the WLTitleExpired header. Sent base64-encoded (the format
+	// Happ/INCY/v2rayNG render cleanly, unlike raw percent-encoding).
+	FailoverTitle string
+
 	// LogLevel is one of: debug, info, warn, error.
 	LogLevel string
 
@@ -126,6 +137,8 @@ func FromEnv() (Config, error) {
 		WLTitleBlocked:           getenvDefault("WL_TITLE_BLOCKED", "⚠️ Whitelist exhausted · basic nodes work"),
 		WLTitleExpired:           getenvDefault("WL_TITLE_EXPIRED", "🔴 Subscription expired · renew in cabinet"),
 		FailoverConfig:           getenv("FAILOVER_CONFIG"),
+		FailoverMessages:         splitPipe(getenvDefault("FAILOVER_MESSAGES", "⌛ Подписка истекла|Свяжитесь с поддержкой|Сервер для связи")),
+		FailoverTitle:            getenvDefault("FAILOVER_TITLE", "KabebaVPN 🦉"),
 		LogLevel:                 getenvDefault("LOG_LEVEL", "info"),
 		ReconcileInterval:        getDurationDefault("RECONCILE_INTERVAL_SEC", 300) * time.Second,
 		HTTPTimeout:              getDurationDefault("HTTP_TIMEOUT_SEC", 15) * time.Second,
@@ -208,6 +221,22 @@ func splitCSV(v string) []string {
 		return nil
 	}
 	parts := strings.Split(v, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if t := strings.TrimSpace(p); t != "" {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+// splitPipe splits a pipe-separated string (used for multi-line message lists
+// where commas may legitimately appear in the text).
+func splitPipe(v string) []string {
+	if v == "" {
+		return nil
+	}
+	parts := strings.Split(v, "|")
 	out := make([]string, 0, len(parts))
 	for _, p := range parts {
 		if t := strings.TrimSpace(p); t != "" {
