@@ -121,9 +121,12 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	short := extractShortUUID(r.URL.Path)
 	title := p.titleForShort(r.Context(), short)
 
-	// Copy upstream response headers, override profile-title with our value.
+	// Copy upstream response headers. We drop the panel's profile-title only
+	// when we have our own status title to overlay; otherwise we forward it
+	// untouched so the panel's branded title (e.g. "KabebaVPN") reaches the
+	// client for healthy users.
 	for k, vs := range resp.Header {
-		if strings.EqualFold(k, "profile-title") {
+		if title != "" && strings.EqualFold(k, "profile-title") {
 			continue
 		}
 		for _, v := range vs {
@@ -139,29 +142,31 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // titleForShort resolves shortUuid → userUuid → wl_state and returns the
-// appropriate title string. On any failure, returns the "active" title as a
-// safe default (better to show a benign title than to break the subscription).
+// status title to overlay on the panel's profile-title. Returns "" when the
+// user is healthy, so the panel's own (branded) title passes through untouched
+// — we only override the header when something is actually wrong (whitelist
+// exhausted or subscription expired by date).
 func (p *Proxy) titleForShort(ctx context.Context, short string) string {
 	if short == "" {
-		return p.titleOn
+		return ""
 	}
 	userUUID, status, ok := p.resolver.ResolveWithStatus(ctx, short)
 	if !ok {
-		// Unknown / new user — show active title (panel default).
-		return p.titleOn
+		// Unknown / new user — leave the panel title alone.
+		return ""
 	}
 	if isExpiredStatus(status) {
 		return p.titleExp
 	}
 	st, _ := p.store.Get(ctx, userUUID, 0)
 	if st == nil {
-		return p.titleOn
+		return ""
 	}
 	switch st.WLState {
 	case state.WLGrace, state.WLBlocked:
 		return p.titleOff
 	default:
-		return p.titleOn
+		return ""
 	}
 }
 

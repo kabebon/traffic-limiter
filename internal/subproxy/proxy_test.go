@@ -86,7 +86,7 @@ func TestProxy_RewritesProfileTitle(t *testing.T) {
 	}
 }
 
-func TestProxy_ActiveTitleWhenWLActive(t *testing.T) {
+func TestProxy_ActiveTitlePassesThroughPanelTitle(t *testing.T) {
 	dir := t.TempDir()
 	store, _ := state.Open(dir + "/test.sqlite")
 	defer store.Close()
@@ -95,7 +95,8 @@ func TestProxy_ActiveTitleWhenWLActive(t *testing.T) {
 	mockPanel := startMockPanel(t, userUUID)
 	client := remnawave.New(mockPanel.URL, "tok", 5*time.Second)
 
-	// Default wl_state is active (no row = active).
+	// Default wl_state is active (no row = active). For a healthy user we must
+	// NOT overlay our title — the panel's branded title passes through.
 	cfg := config.Config{
 		PanelURL:        mockPanel.URL,
 		WLTitleActive:   "ACTIVE",
@@ -111,8 +112,10 @@ func TestProxy_ActiveTitleWhenWLActive(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("want 200, got %d", rec.Code)
 	}
-	if got := rec.Header().Get("Profile-Title"); got != "ACTIVE" {
-		t.Fatalf("Profile-Title = %q, want ACTIVE", got)
+	// The mock panel sets Profile-Title: original-panel-title; we expect it
+	// to be forwarded unchanged (no "ACTIVE" overlay).
+	if got := rec.Header().Get("Profile-Title"); got != "original-panel-title" {
+		t.Fatalf("Profile-Title = %q, want the panel's original title to pass through", got)
 	}
 }
 
