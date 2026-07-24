@@ -26,6 +26,49 @@ func (c *Client) GetUser(ctx context.Context, uuid string) (*User, error) {
 	return u, nil
 }
 
+// GetUsers returns all users by paginating through the API.
+func (c *Client) GetUsers(ctx context.Context) ([]*User, error) {
+	var all []*User
+	offset := 0
+	limit := 1000
+
+	for {
+		var w struct {
+			Response []json.RawMessage `json:"response"`
+			Data     []json.RawMessage `json:"data"`
+			Users    []json.RawMessage `json:"users"`
+		}
+		path := fmt.Sprintf("/api/users?limit=%d&offset=%d", limit, offset)
+		if err := c.do(ctx, http.MethodGet, path, nil, &w); err != nil {
+			return nil, err
+		}
+
+		items := w.Response
+		if len(w.Data) > 0 {
+			items = w.Data
+		} else if len(w.Users) > 0 {
+			items = w.Users
+		}
+
+		if len(items) == 0 {
+			break
+		}
+
+		for _, raw := range items {
+			u, err := decodeUser(raw)
+			if err == nil && u != nil {
+				all = append(all, u)
+			}
+		}
+
+		if len(items) < limit {
+			break
+		}
+		offset += limit
+	}
+	return all, nil
+}
+
 // decodeUser parses a panel user object, including the userTraffic sub-object
 // (usedTrafficBytes lives there in current panel versions, not at the top level).
 func decodeUser(raw json.RawMessage) (*User, error) {

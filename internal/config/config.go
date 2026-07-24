@@ -135,7 +135,7 @@ func FromEnv() (Config, error) {
 		SubproxyCacheTTL:         getDurationDefault("SUBPROXY_CACHE_TTL_SEC", 300) * time.Second,
 		WLTitleActive:            getenvDefault("WL_TITLE_ACTIVE", "VPN · whitelist active"),
 		WLTitleBlocked:           getenvDefault("WL_TITLE_BLOCKED", "⚠️ Whitelist exhausted · basic nodes work"),
-		WLTitleExpired:           getenvDefault("WL_TITLE_EXPIRED", "🔴 Subscription expired · renew in cabinet"),
+		WLTitleExpired:           getenvDefault("WL_TITLE_EXPIRED", ""),
 		FailoverConfig:           getenv("FAILOVER_CONFIG"),
 		FailoverMessages:         splitPipe(getenvDefault("FAILOVER_MESSAGES", "⌛ Подписка истекла|Свяжитесь с поддержкой|Сервер для связи")),
 		FailoverTitle:            getenvDefault("FAILOVER_TITLE", "KabebaVPN 🦉"),

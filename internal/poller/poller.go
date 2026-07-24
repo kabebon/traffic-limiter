@@ -54,12 +54,27 @@ func (p *Poller) tick(ctx context.Context) {
 	type acc struct{ delta int64 }
 	totals := make(map[string]*acc)
 
+	var usernameMap map[string]string
+
 	for _, nodeUUID := range p.cfg.BasicNodeUUIDs {
 		entries, err := p.client.NodeUsage(ctx, nodeUUID, from, to)
 		if err != nil {
 			p.log.Warn("node usage fetch failed", "node", nodeUUID, "err", err)
 			continue
 		}
+
+		// Ensure we have a username->uuid map if we see non-UUIDs.
+		for i, e := range entries {
+			if len(e.UserUUID) != 36 {
+				if usernameMap == nil {
+					usernameMap = p.buildUsernameMap(ctx)
+				}
+				if uuid, ok := usernameMap[e.UserUUID]; ok && uuid != "" {
+					entries[i].UserUUID = uuid
+				}
+			}
+		}
+
 		for _, e := range entries {
 			delta, err := p.store.SetUsageCheckpoint(ctx, nodeUUID, e.UserUUID, e.Bytes)
 			if err != nil {
@@ -88,4 +103,20 @@ func (p *Poller) tick(ctx context.Context) {
 			p.log.Warn("basic-block evaluation failed", "user", userUUID, "err", err)
 		}
 	}
+}
+
+// buildUsernameMap fetches users from the panel and builds a username->uuid map.
+func (p *Poller) buildUsernameMap(ctx context.Context) map[string]string {
+	m := make(map[string]string)
+	users, err := p.client.GetUsers(ctx)
+	if err != nil {
+		p.log.Warn("failed to fetch users for username mapping", "err", err)
+		return m
+	}
+	for _, u := range users {
+		if u.Username != "" {
+			m[u.Username] = u.UUID
+		}
+	}
+	return m
 }
