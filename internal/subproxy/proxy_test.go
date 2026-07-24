@@ -19,10 +19,17 @@ import (
 //   GET /api/sub/{short}        → plain-text body + a Profile-Title header
 func startMockPanel(t *testing.T, userUUID string) *httptest.Server {
 	t.Helper()
+	return startMockPanelWithExpire(t, userUUID, 0)
+}
+
+// startMockPanelWithExpire is like startMockPanel but also sets the
+// Subscription-Userinfo expire= field on subscription responses. expire=0 means
+// "no expiry" (header omitted); a negative value means "in the past".
+func startMockPanelWithExpire(t *testing.T, userUUID string, expire int64) *httptest.Server {
+	t.Helper()
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/api/sub/", func(w http.ResponseWriter, r *http.Request) {
-		// r.URL.Path is like /api/sub/{short} or /api/sub/{short}/info
 		if strings.HasSuffix(r.URL.Path, "/info") {
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = fmt.Fprintf(w,
@@ -32,7 +39,11 @@ func startMockPanel(t *testing.T, userUUID string) *httptest.Server {
 		// The subscription body itself.
 		w.Header().Set("Content-Type", "text/plain")
 		w.Header().Set("Profile-Title", "original-panel-title")
-		_, _ = w.Write([]byte("# subscription body\nvless://...\n"))
+		if expire != 0 {
+			w.Header().Set("Subscription-Userinfo",
+				fmt.Sprintf("upload=0; download=100; total=0; expire=%d", expire))
+		}
+		_, _ = w.Write([]byte("# subscription body\nvless://should-not-appear\n"))
 	})
 
 	srv := httptest.NewServer(mux)
@@ -133,41 +144,10 @@ func TestProxy_RejectsNonSubPath(t *testing.T) {
 	}
 }
 
-// startMockPanelWithStatus extends startMockPanel to also answer
-// GET /api/users/{uuid} with a given status, which the resolver's status
-// lookup (ResolveWithStatus → GetUser) needs.
-func startMockPanelWithStatus(t *testing.T, userUUID, status string) *httptest.Server {
-	t.Helper()
-	mux := http.NewServeMux()
-
-	mux.HandleFunc("/api/sub/", func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasSuffix(r.URL.Path, "/info") {
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = fmt.Fprintf(w,
-				`{"response":{"isFound":true,"user":{"uuid":%q}}}`, userUUID)
-			return
-		}
-		w.Header().Set("Content-Type", "text/plain")
-		w.Header().Set("Profile-Title", "original-panel-title")
-		_, _ = w.Write([]byte("# subscription body\nvless://should-not-appear\n"))
-	})
-
-	mux.HandleFunc("/api/users/", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = fmt.Fprintf(w,
-			`{"response":{"uuid":%q,"status":%q,"userTraffic":{"usedTrafficBytes":0}}}`,
-			userUUID, status)
-	})
-
-	srv := httptest.NewServer(mux)
-	t.Cleanup(srv.Close)
-	return srv
-}
-
-// TestProxy_FailoverOnExpired verifies that an expired-by-date subscription
-// (panel status EXPIRED) is served the single failover server instead of the
-// panel body, with the expired profile-title, and that the panel subscription
-// endpoint is NOT hit.
+// TestProxy_FailoverOnExpired verifies that a subscription whose expire=
+// timestamp is in the past is served the single rescue server instead of the
+// panel body, with the expired profile-title, and that the panel body is NOT
+// returned.
 func TestProxy_FailoverOnExpired(t *testing.T) {
 	dir := t.TempDir()
 	store, err := state.Open(dir + "/test.sqlite")
@@ -177,7 +157,8 @@ func TestProxy_FailoverOnExpired(t *testing.T) {
 	t.Cleanup(func() { _ = store.Close() })
 
 	userUUID := "u-expired"
-	mockPanel := startMockPanelWithStatus(t, userUUID, "EXPIRED")
+	// expire far in the past.
+	mockPanel := startMockPanelWithExpire(t, userUUID, time.Now().Add(-24*time.Hour).Unix())
 	client := remnawave.New(mockPanel.URL, "tok", 5*time.Second)
 
 	failover := "vless://rescue@example.com:443?encryption=none#RESCUE"
@@ -210,15 +191,17 @@ func TestProxy_FailoverOnExpired(t *testing.T) {
 	}
 }
 
-// TestProxy_NoFailoverOnActive verifies that an active subscription is NOT
-// served the failover server — it must be proxied through to the panel.
+// TestProxy_NoFailoverOnActive verifies that an active subscription (no expire
+// header) is NOT served the failover server — it must be proxied through to
+// the panel.
 func TestProxy_NoFailoverOnActive(t *testing.T) {
 	dir := t.TempDir()
 	store, _ := state.Open(dir + "/test.sqlite")
 	defer store.Close()
 
 	userUUID := "u-active2"
-	mockPanel := startMockPanelWithStatus(t, userUUID, "ACTIVE")
+	// No expire header at all (active/unlimited).
+	mockPanel := startMockPanel(t, userUUID)
 	client := remnawave.New(mockPanel.URL, "tok", 5*time.Second)
 
 	cfg := config.Config{
@@ -245,4 +228,80 @@ func TestProxy_NoFailoverOnActive(t *testing.T) {
 	if strings.Contains(body, "rescue") {
 		t.Fatalf("active user must NOT get the failover server, got %q", body)
 	}
+}
+
+// TestProxy_NoFailoverOnFutureExpiry verifies that a subscription whose expire
+// is in the future is NOT treated as expired.
+func TestProxy_NoFailoverOnFutureExpiry(t *testing.T) {
+	dir := t.TempDir()
+	store, _ := state.Open(dir + "/test.sqlite")
+	defer store.Close()
+
+	userUUID := "u-future"
+	mockPanel := startMockPanelWithExpire(t, userUUID, time.Now().Add(24*time.Hour).Unix())
+	client := remnawave.New(mockPanel.URL, "tok", 5*time.Second)
+
+	cfg := config.Config{
+		PanelURL:         mockPanel.URL,
+		WLTitleActive:    "ACTIVE",
+		WLTitleBlocked:   "BLOCKED",
+		WLTitleExpired:   "EXPIRED-TITLE",
+		FailoverConfig:   "vless://rescue@example.com:443#RESCUE",
+		SubproxyCacheTTL: 60 * time.Second,
+	}
+	p := New(cfg, client, store, nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/sub/shortfut", nil)
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	body := rec.Body.String()
+	if !strings.Contains(body, "should-not-appear") {
+		t.Fatalf("future-expiry user should get the proxied panel body, got %q", body)
+	}
+	if strings.Contains(body, "rescue") {
+		t.Fatalf("future-expiry user must NOT get the failover server, got %q", body)
+	}
+}
+
+// TestIsExpiredByHeader covers the expiry detection directly.
+func TestIsExpiredByHeader(t *testing.T) {
+	now := time.Now().Unix()
+	cases := []struct {
+		name string
+		h    http.Header
+		want bool
+	}{
+		{"no header", http.Header{}, false},
+		{"expire_zero_means_unlimited", mkUI(0), false},
+		{"past", mkUI(now - 1), true},
+		{"future", mkUI(now + 100000), false},
+		{"missing_expire_field", mkHeaderNoExpire(), false},
+		{"unparsable", mkUIUnparsable(), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isExpiredByHeader(tc.h); got != tc.want {
+				t.Fatalf("isExpiredByHeader = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func mkUI(expire int64) http.Header {
+	h := http.Header{}
+	h.Set("Subscription-Userinfo", fmt.Sprintf("upload=0; download=100; total=0; expire=%d", expire))
+	return h
+}
+
+func mkHeaderNoExpire() http.Header {
+	h := http.Header{}
+	h.Set("Subscription-Userinfo", "upload=0; download=100; total=0")
+	return h
+}
+
+func mkUIUnparsable() http.Header {
+	h := http.Header{}
+	h.Set("Subscription-Userinfo", "upload=0; download=100; total=0; expire=abc")
+	return h
 }

@@ -1,16 +1,21 @@
 // Package subproxy is a reverse-proxy in front of the Remnawave subscription
 // endpoint that rewrites the profile-title header per-user based on this
-// orchestrator's whitelist state. This lets Happ / INCY / v2rayNG show a
-// status line ("⚠️ whitelist exhausted, basic still works") in the app header
-// instead of the static subscription title.
+// orchestrator's whitelist state, and serves a rescue server to users whose
+// subscription is expired by date.
 //
 // Flow:
 //
 //	client GET /sub/{shortUuid}[...]
 //	  → proxy fetches /api/sub/{shortUuid}[/...] from the panel (passthrough body)
-//	  → proxy resolves shortUuid → userUuid (via /api/sub/{short}/info, cached)
-//	  → proxy reads wl_state from SQLite
-//	  → proxy overwrites the profile-title response header and forwards body
+//	  → proxy inspects the Subscription-Userinfo response header:
+//	      - expire in the past  → serve FAILOVER_CONFIG rescue server instead
+//	      - otherwise           → resolve shortUuid→userUuid, read wl_state,
+//	                              overlay a status profile-title, forward body
+//
+// Expiry is detected from the response header (not from a separate panel call)
+// because the panel's /api/sub/{short}/info endpoint is slow / unreliable for
+// expired users, while the subscription response itself always carries an
+// accurate `expire=` timestamp.
 //
 // The proxy is OPT-IN: it only mounts when SUBPROXY_ENABLED=true. Otherwise
 // traffic-limiter runs without it (clients keep pointing at the panel directly).
@@ -21,7 +26,9 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/traffic-limiter/internal/config"
 	"github.com/traffic-limiter/internal/remnawave"
@@ -78,25 +85,12 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Failover branch: if the subscription is expired by date (panel status
-	// EXPIRED), serve a single rescue server so the user can open the cabinet
-	// and renew. We do NOT proxy the panel here — an expired subscription has
-	// no usable nodes to serve. This is deliberately distinct from a whitelist
-	// quota exhaustion (which keeps basic nodes and is handled below).
-	if p.failover != "" {
-		short := extractShortUUID(r.URL.Path)
-		if _, status, ok := p.resolver.ResolveWithStatus(r.Context(), short); ok && isExpiredStatus(status) {
-			p.serveFailover(w)
-			return
-		}
-	}
-
 	panelURL := p.panelBase + "/api" + r.URL.Path
 	if r.URL.RawQuery != "" {
 		panelURL += "?" + r.URL.RawQuery
 	}
 
-	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, panelURL, nil)
+	req, err := http.NewRequestWithContext(r.Context(), r.Method, panelURL, nil)
 	if err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
@@ -117,6 +111,18 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer resp.Body.Close()
+
+	// Failover branch: if the subscription is expired by date (expire header
+	// in the past) and a rescue server is configured, serve it instead of the
+	// panel body. We detect expiry from the response header — the panel's
+	// /api/sub/{short}/info endpoint is slow/unreliable for expired users, but
+	// the subscription response always carries an accurate expire= timestamp.
+	// This is deliberately distinct from a whitelist quota exhaustion, which
+	// keeps basic nodes and is handled by the title overlay below.
+	if p.failover != "" && isExpiredByHeader(resp.Header) {
+		p.serveFailover(w)
+		return
+	}
 
 	short := extractShortUUID(r.URL.Path)
 	title := p.titleForShort(r.Context(), short)
@@ -144,19 +150,17 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // titleForShort resolves shortUuid → userUuid → wl_state and returns the
 // status title to overlay on the panel's profile-title. Returns "" when the
 // user is healthy, so the panel's own (branded) title passes through untouched
-// — we only override the header when something is actually wrong (whitelist
-// exhausted or subscription expired by date).
+// — we only override the header when the whitelist quota is exhausted. Note:
+// expiry-by-date is handled in ServeHTTP via the rescue branch, so we don't
+// need to detect it here.
 func (p *Proxy) titleForShort(ctx context.Context, short string) string {
 	if short == "" {
 		return ""
 	}
-	userUUID, status, ok := p.resolver.ResolveWithStatus(ctx, short)
+	userUUID, _, ok := p.resolver.ResolveWithStatus(ctx, short)
 	if !ok {
 		// Unknown / new user — leave the panel title alone.
 		return ""
-	}
-	if isExpiredStatus(status) {
-		return p.titleExp
 	}
 	st, _ := p.store.Get(ctx, userUUID, 0)
 	if st == nil {
@@ -207,15 +211,31 @@ func (p *Proxy) serveFailover(w http.ResponseWriter) {
 	}
 }
 
-// isExpiredStatus reports whether the panel-side status means the subscription
-// is expired by date and should be served the failover server. An empty status
-// (unknown / fetch error) returns false so we never fail-closed into rescue
-// mode for a user who might still be active.
-func isExpiredStatus(status string) bool {
-	switch status {
-	case string(remnawave.StatusExpired):
-		return true
-	default:
+// isExpiredByHeader reports whether the subscription is expired by date,
+// determined from the Subscription-Userinfo response header that the panel
+// sends with the subscription body:
+//
+//	Subscription-Userinfo: upload=...; download=...; total=...; expire=<unix>
+//
+// A subscription is expired when `expire` is present, non-zero, and in the
+// past. expire=0 (or absent) means "no expiry / unlimited", which we treat as
+// NOT expired. We never fail-closed into rescue mode: an absent or unparsable
+// header returns false.
+func isExpiredByHeader(h http.Header) bool {
+	ui := h.Get("Subscription-Userinfo")
+	if ui == "" {
 		return false
 	}
+	for _, field := range strings.Split(ui, ";") {
+		field = strings.TrimSpace(field)
+		if !strings.HasPrefix(field, "expire=") {
+			continue
+		}
+		expire, err := strconv.ParseInt(strings.TrimPrefix(field, "expire="), 10, 64)
+		if err != nil || expire <= 0 {
+			return false
+		}
+		return expire < time.Now().Unix()
+	}
+	return false
 }
