@@ -115,3 +115,34 @@ func TestPlanBLimitCeilingValue(t *testing.T) {
 		t.Fatal("planB override must be >= ceiling")
 	}
 }
+
+// TestEffectiveLimitForRelay verifies that the relay never forwards the Plan-B
+// override (~1 EiB) to the bot, which would otherwise show ~1 million GB in the
+// cabinet. It falls back to the original whitelist limit, or 0 if unknown.
+func TestEffectiveLimitForRelay(t *testing.T) {
+	planB := int64(1) << 50 // Plan-B override
+	original := int64(100 * 1024 * 1024 * 1024)
+
+	cases := []struct {
+		name          string
+		panelLimit    int64
+		originalLimit int64
+		want          int64
+	}{
+		{"plan_b_falls_back_to_original", planB, original, original},
+		{"plan_b_no_original_returns_zero", planB, 0, 0},
+		{"sane_panel_limit_passes_through", original, original, original},
+		{"zero_panel_uses_original", 0, original, original},
+		{"zero_panel_no_original_zero", 0, 0, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			panel := &remnawave.User{DataLimitBytes: tc.panelLimit}
+			got := effectiveLimitForRelay(panel, tc.originalLimit)
+			if got != tc.want {
+				t.Fatalf("effectiveLimitForRelay(panelLimit=%d, original=%d) = %d, want %d",
+					tc.panelLimit, tc.originalLimit, got, tc.want)
+			}
+		})
+	}
+}
