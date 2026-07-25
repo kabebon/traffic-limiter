@@ -2,6 +2,7 @@ package subproxy
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -94,6 +95,89 @@ func TestProxy_RewritesProfileTitle(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "vless://") {
 		t.Fatalf("subscription body not proxied: %q", rec.Body.String())
+	}
+}
+
+// TestProxy_AnnounceOverlayForBlocked verifies that a blocked user gets the
+// Announce status header overlaid (plus the blocked profile-title), while an
+// active user gets neither.
+func TestProxy_AnnounceOverlayForBlocked(t *testing.T) {
+	dir := t.TempDir()
+	store, err := state.Open(dir + "/test.sqlite")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	userUUID := "u-blocked-ann"
+	mockPanel := startMockPanel(t, userUUID)
+	client := remnawave.New(mockPanel.URL, "tok", 5*time.Second)
+
+	err = store.Update(context.Background(), userUUID, 0, func(st *state.UserState) error {
+		st.WLState = state.WLBlocked
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("seed state: %v", err)
+	}
+
+	announceText := "Трафик по белым нодам исчерпан\nДокупите или напишите в поддержку"
+	cfg := config.Config{
+		PanelURL:         mockPanel.URL,
+		WLTitleActive:    "ACTIVE",
+		WLTitleBlocked:   "BLOCKED",
+		WLAnnounceBlocked: announceText,
+		SubproxyCacheTTL: 60 * time.Second,
+	}
+	p := New(cfg, client, store, nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/sub/shortblk", nil)
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	// Blocked user: profile-title overlay present.
+	if got := rec.Header().Get("Profile-Title"); got != "BLOCKED" {
+		t.Fatalf("Profile-Title = %q, want BLOCKED", got)
+	}
+	// Announce header present and base64-decodes to our text.
+	gotAnnounce := rec.Header().Get("Announce")
+	if gotAnnounce == "" {
+		t.Fatal("Announce header missing for blocked user")
+	}
+	dec, err := base64.StdEncoding.DecodeString(gotAnnounce)
+	if err != nil {
+		t.Fatalf("Announce not base64: %v (raw=%q)", err, gotAnnounce)
+	}
+	if string(dec) != announceText {
+		t.Fatalf("Announce decoded = %q, want %q", string(dec), announceText)
+	}
+}
+
+func TestProxy_NoAnnounceForActive(t *testing.T) {
+	dir := t.TempDir()
+	store, _ := state.Open(dir + "/test.sqlite")
+	defer store.Close()
+
+	userUUID := "u-active-noann"
+	mockPanel := startMockPanel(t, userUUID)
+	client := remnawave.New(mockPanel.URL, "tok", 5*time.Second)
+
+	cfg := config.Config{
+		PanelURL:         mockPanel.URL,
+		WLTitleActive:    "ACTIVE",
+		WLTitleBlocked:   "BLOCKED",
+		WLAnnounceBlocked: "should-not-appear",
+		SubproxyCacheTTL: 60 * time.Second,
+	}
+	p := New(cfg, client, store, nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/sub/shortact2", nil)
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	// Active user: no announce overlay, panel title passes through.
+	if got := rec.Header().Get("Announce"); got != "" {
+		t.Fatalf("active user must NOT get Announce, got %q", got)
 	}
 }
 
