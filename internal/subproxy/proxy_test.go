@@ -40,6 +40,7 @@ func startMockPanelWithExpire(t *testing.T, userUUID string, expire int64) *http
 		// The subscription body itself.
 		w.Header().Set("Content-Type", "text/plain")
 		w.Header().Set("Profile-Title", "original-panel-title")
+		w.Header().Set("Subscription-Userinfo", "upload=1; download=2; total=999; expire=0")
 		if expire != 0 {
 			w.Header().Set("Subscription-Userinfo",
 				fmt.Sprintf("upload=0; download=100; total=0; expire=%d", expire))
@@ -95,6 +96,9 @@ func TestProxy_RewritesProfileTitle(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "vless://") {
 		t.Fatalf("subscription body not proxied: %q", rec.Body.String())
+	}
+	if got := rec.Header().Get("Subscription-Userinfo"); got != "upload=1; download=2; total=0; expire=0" {
+		t.Fatalf("Subscription-Userinfo = %q, want total=0 overlay", got)
 	}
 }
 

@@ -58,7 +58,11 @@ func main() {
 
 	// Background workers.
 	go eng.RunReconciler(rootCtx)
-	go poller.New(cfg, client, store, eng, log).Run(rootCtx)
+	if len(cfg.BasicNodeUUIDs) > 0 {
+		go poller.New(cfg, client, store, eng, log).Run(rootCtx)
+	} else {
+		log.Info("basic traffic poller disabled: BASIC_NODE_UUIDS is empty")
+	}
 
 	mux := http.NewServeMux()
 	mux.Handle("/webhook", webhook.NewHandler(cfg.WebhookSecretValue, eng))

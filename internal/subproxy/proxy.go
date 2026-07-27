@@ -153,6 +153,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if title != "" {
 		w.Header().Set("Profile-Title", percentEncode(title))
+		w.Header().Set("Subscription-Userinfo", unlimitedUserinfo(resp.Header.Get("Subscription-Userinfo")))
 	}
 	// When the whitelist quota is exhausted, overlay a longer status message
 	// via the Announce header (base64-encoded, the format Happ/Clash render).

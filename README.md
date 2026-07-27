@@ -1,9 +1,9 @@
 # traffic-limiter
 
-Автономный Go-сервис, который поверх панели **Remnawave** даёт две вещи, недоступные из коробки:
+Автономный Go-сервис, который поверх панели **Remnawave** даёт контроль whitelist/basic-доступа, недоступный из коробки:
 
-1. **Тарификация только «белых» нод** — при исчерпании белого лимита отрубаются *только* белые ноды, а «обычные» (basic) продолжают работать.
-2. **Отдельный лимит на basic-ноды** — считается самим сервисом через периодический опрос статистики панели.
+1. **Тарификация только «белых» нод** — при исчерпании белого лимита отрубаются *только* белые ноды, а «обычные» (basic) продолжают работать как fallback.
+2. **Опциональный лимит на basic-ноды** — включается только если задать `BASIC_NODE_UUIDS`; если список пустой, basic-трафик не считается.
 
 Сервис **полностью самостоятелен**: работает без бота bedolaga (или любого другого). Код бота **не модифицируется** — это сознательное решение, чтобы обновления бота ничего не затирали. При желании сервис может опционально перенаправлять обработанные события в готовый эндпоинт бота `/remnawave-webhook` (только HTTP-вызов, без правок кода).
 
@@ -21,7 +21,7 @@
                 ┌─────────────────── Remnawave Panel ────────────────────┐
                 │  user.limited          → webhook (HMAC-SHA256)          │
                 │  user.traffic_reset    → webhook                        │
-                │  /api/bandwidth-stats/nodes/{uuid}/users → poller       │
+                │  /api/bandwidth-stats/nodes/{uuid}/users → poller (opt) │
                 └─────────────────────────────┬───────────────────────────┘
                                               │ POST /webhook
                                               ▼
@@ -31,6 +31,7 @@
                           │  • verify HMAC-SHA256 sig        │
                           │  • engine: cut/restore squads    │
                           │  • poller: count basic traffic   │
+                          │    (optional)                    │
                           │  • reconciler: lost-webhook fix  │
                           │  • SQLite state                  │
                           └────────────┬─────────────────────┘
@@ -54,26 +55,26 @@
 
 | Squad | Inbounds | consumptionMultiplier | Кто считает лимит |
 |---|---|---|---|
-| `basic` | обычные ноды | `0` | этот сервис (поллит stats) |
+| `basic` | обычные ноды | `0` | безлимитный fallback; опционально этот сервис (если задан `BASIC_NODE_UUIDS`) |
 | `whitelist` | белые ноды | `1` | сама панель (`trafficLimitBytes`) |
 
 Пользователь состоит в **обоих** squad'ах по умолчанию.
 
 ### Поведение при лимитах
 
-- **Whitelist исчерпан:** `user.limited` → сервис переводит юзера в **грейс** (окно по времени и/или over-limit), затем убирает `whitelist` squad и возвращает `ACTIVE`. Дополнительно временно ставит огромный `trafficLimitBytes` + `NO_RESET`, чтобы панель не упала обратно в `LIMITED`.
-- **Basic исчерпан:** poller видит `basic_used ≥ basic_limit` → убирает `basic` squad.
+- **Whitelist исчерпан:** `user.limited` → сервис сразу убирает `whitelist` squad, принудительно добавляет `basic` squad, возвращает `ACTIVE` и ставит `trafficLimitBytes=0` + `NO_RESET`. Для Remnawave это честный безлимит на оставшийся basic-only доступ, а фактический доступ ограничивается squad'ом.
+- **Basic исчерпан (только если включён basic-poller):** poller видит `basic_used ≥ basic_limit` → убирает `basic` squad.
 - **Сброс:** по `user.traffic_reset`/`user.data_used_reset` или внешнему `POST /admin/repay/{uuid}` — оба squad'а возвращаются, счётчики обнуляются.
-- **Докупка трафика (кнопка бота):** бот шлёт `PATCH trafficLimitBytes` → панель фаерит `user.modified` (не `traffic_reset`!). Сервис ловит его и возвращает whitelist squad, если юзер действительно получил дополнительный лимит (проверка: новый `trafficLimitBytes` больше сохранённого оригинала ИЛИ `usedTrafficBytes` упал ниже оригинала). Это важно: без этого хендлера кнопка «📊 докупить трафик» в боте **не возвращала бы белые ноды** — юзер платил бы впустую. Наш же Plan-B override (~1 EiB лимит) намеренно игнорируется, чтобы не было ложных разблокировок.
+- **Докупка трафика (кнопка бота):** бот шлёт `PATCH trafficLimitBytes` и свой платный/whitelist squad → панель фаерит `user.modified` (не `traffic_reset`!). Сервис ловит его и возвращает канонический набор squad'ов, если юзер действительно получил дополнительный лимит (проверка: новый `trafficLimitBytes` больше сохранённого оригинала ИЛИ `usedTrafficBytes` упал ниже оригинала). `trafficLimitBytes=0` от basic-only режима намеренно не считается сигналом восстановления.
 
 ### Как работает докупка трафика в боте (end-to-end)
 
 | Шаг | Кто | Что делает |
 |---|---|---|
 | 1 | Юзер | Жмёт «📊 докупить трафик» в боте. Бот списывает деньги. |
-| 2 | Бот | `PATCH /api/users` с новым `trafficLimitBytes` (повышенным). |
+| 2 | Бот | `PATCH /api/users` с новым `trafficLimitBytes` (повышенным) и платным/whitelist squad. |
 | 3 | Панель | Применяет, шлёт webhook `user.modified` с обновлёнными `trafficLimitBytes`/`usedTrafficBytes`. |
-| 4 | **traffic-limiter** | `onUserModified` видит: юзер в `blocked`, новый лимит > оригинала → возвращает `whitelist` squad, восстанавливает нормальный лимит и стратегию (перетирая Plan-B). |
+| 4 | **traffic-limiter** | `onUserModified` видит: юзер в `blocked`, новый лимит > оригинала → возвращает канонический набор squad'ов (`basic` + `whitelist`), сохраняет новый платный лимит и нормальную стратегию. |
 | 5 | Юзер | Белые ноды снова работают, при следующем окне бот (если включён relay) увидит `user.modified` и обновит счётчики. |
 
 Альтернатива — кнопка «🔄 сбросить трафик»: бот шлёт `POST /actions/reset-traffic`, панель обнуляет `usedTrafficBytes` и фаерит `user.traffic_reset`, сервис возвращает whitelist по основному пути `onUserReset`. Обе ветки работают.
@@ -201,9 +202,9 @@ curl -H "Authorization: Bearer $STATE_API_TOKEN" \
 
 ## Переменные окружения
 
-См. `.env.example`. Обязательные: `REMNAWAVE_PANEL_URL`, `REMNAWAVE_API_TOKEN`, `WEBHOOK_SECRET_VALUE`, `BASIC_SQUAD_UUID`, `WHITELIST_SQUAD_UUID`, `BASIC_NODE_UUIDS`.
+См. `.env.example`. Обязательные: `REMNAWAVE_PANEL_URL`, `REMNAWAVE_API_TOKEN`, `WEBHOOK_SECRET_VALUE`, `BASIC_SQUAD_UUID`, `WHITELIST_SQUAD_UUID`.
 
-Ключевые опциональные: `BOT_WEBHOOK_URL`/`BOT_WEBHOOK_SECRET` (relay в бота), `WHITELIST_GRACE_*`, `BASIC_POLL_INTERVAL_SEC`, `BASIC_DEFAULT_LIMIT_GB`, `ADMIN_TOKEN`, `STATE_API_TOKEN`.
+Ключевые опциональные: `BOT_WEBHOOK_URL`/`BOT_WEBHOOK_SECRET` (relay в бота), `BASIC_NODE_UUIDS`/`BASIC_POLL_INTERVAL_SEC`/`BASIC_DEFAULT_LIMIT_GB` (отдельный basic-лимит), `ADMIN_TOKEN`, `STATE_API_TOKEN`.
 
 Подписочный прокси: `SUBPROXY_ENABLED` (включить прокси `/sub/`), `WL_TITLE_ACTIVE`/`WL_TITLE_BLOCKED`/`WL_TITLE_EXPIRED` (заголовки для трёх веток), `FAILOVER_CONFIG` (rescue-сервер для истёкших по дате), `SUBPROXY_CACHE_TTL_SEC`.
 
@@ -211,12 +212,13 @@ curl -H "Authorization: Bearer $STATE_API_TOKEN" \
 
 ## Тест-план
 
-1. **Whitelist + грейс.** Юзер `trafficLimitBytes = 100 МБ`, `WHITELIST_GRACE_OVERLIMIT_MB=50`. Нагнать 100 МБ через белую ноду → `grace`. Нагнать ещё 50 (или подождать окно) → `whitelist` squad убран, белая не коннектится, basic работает, `status=ACTIVE`.
+1. **Whitelist exhausted.** Юзер `trafficLimitBytes = 100 МБ`. Нагнать 100 МБ через белую ноду → `whitelist` squad убран, `basic` squad добавлен, `trafficLimitBytes=0`, `status=ACTIVE`.
 2. **Reset.** Дождаться `trafficLimitStrategy` или дёрнуть `/admin/repay/{uuid}` → счётчики обнулены, `whitelist` возвращён, белая снова работает.
-3. **Basic лимит.** Нагнать трафик через basic-ноду до `basic_limit` → `basic` squad убран, whitelist (если активен) продолжает работать.
-4. **Гонки.** Одновременно `limited` + `reset` → состояние консистентно (per-user mutex в engine).
-5. **Потеря вебхука.** Сервис видит юзера `LIMITED`, хотя локально `active` → reconciler за `RECONCILE_INTERVAL_SEC` отрабатывает `user.limited`-флоу.
-6. **Relay в бота.** При `BOT_WEBHOOK_URL` заданном: `user.limited` доходит до бота как `user.modified` `status=ACTIVE`; бот НЕ ставит подписке `LIMITED`. Проверить через логи бота.
+3. **Basic fallback.** При пустом `BASIC_NODE_UUIDS` после исчерпания whitelist basic-ноды продолжают работать без локального учёта трафика.
+4. **Basic лимит (если включён).** Задать `BASIC_NODE_UUIDS`, нагнать трафик через basic-ноду до `basic_limit` → `basic` squad убран, whitelist (если активен) продолжает работать.
+5. **Гонки.** Одновременно `limited` + `reset` → состояние консистентно (per-user mutex в engine).
+6. **Потеря вебхука.** Сервис видит юзера `LIMITED`, хотя локально `active` → reconciler за `RECONCILE_INTERVAL_SEC` отрабатывает `user.limited`-флоу.
+7. **Relay в бота.** При `BOT_WEBHOOK_URL` заданном: `user.limited` доходит до бота как `user.modified` `status=ACTIVE`; бот НЕ ставит подписке `LIMITED`. Проверить через логи бота.
 
 ---
 
@@ -304,5 +306,5 @@ Happ/INCY ──GET──► /sub/{shortUuid}[/...]   (на traffic-limiter, н�
 ## Известные ограничения / TODO
 
 - Формат ответа `/api/bandwidth-stats/nodes/{uuid}/users` сверен с актуальным API через код bedolaga-бота (`get_bandwidth_stats_node_users`). Если панель вернёт неизвестную форму — `parseNodeUsage` залогирует снипет; добавьте разбор в `internal/remnawave/usage.go`.
-- Базовый лимит per-user задаётся через `BASIC_DEFAULT_LIMIT_GB` (один на всех). Per-user значения можно выставить через `engine.SetBasicLimit` программно; HTTP-эндпоинт для этого не сделан — добавьте при интеграции с биллингом.
+- Отдельный basic-лимит выключен, если `BASIC_NODE_UUIDS` пустой. Если он включён, лимит per-user задаётся через `BASIC_DEFAULT_LIMIT_GB` (один на всех). Per-user значения можно выставить через `engine.SetBasicLimit` программно; HTTP-эндпоинт для этого не сделан — добавьте при интеграции с биллингом.
 - Relay делает одну попытку с одним ретраем; для production-нагрузки стоит добавить очередь (outbox) при больших объёмах.

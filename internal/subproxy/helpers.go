@@ -57,3 +57,27 @@ func base64Title(s string) string {
 func base64Announce(s string) string {
 	return base64.StdEncoding.EncodeToString([]byte(s))
 }
+
+// unlimitedUserinfo returns Subscription-Userinfo with total=0 while preserving
+// the panel's upload/download/expire fields. In Remnawave subscriptions and
+// common clients, total=0 is displayed as unlimited traffic.
+func unlimitedUserinfo(v string) string {
+	if strings.TrimSpace(v) == "" {
+		return "upload=0; download=0; total=0"
+	}
+	parts := strings.Split(v, ";")
+	sawTotal := false
+	for i, part := range parts {
+		p := strings.TrimSpace(part)
+		if strings.HasPrefix(strings.ToLower(p), "total=") {
+			parts[i] = " total=0"
+			sawTotal = true
+			continue
+		}
+		parts[i] = part
+	}
+	if !sawTotal {
+		parts = append(parts, " total=0")
+	}
+	return strings.Join(parts, ";")
+}

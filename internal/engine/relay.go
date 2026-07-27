@@ -36,12 +36,10 @@ func (e *Engine) relayRaw(ctx context.Context, evt webhook.Event) {
 // without it, the bot would treat a whitelist-only limit as a full
 // subscription exhaustion.
 //
-// IMPORTANT: after a whitelist block, the panel holds our own Plan-B override
-// limit (~1 EiB) so the panel itself doesn't re-enter LIMITED. We must NOT
-// forward that value to the bot — it would show up in the cabinet as ~1 million
-// GB. Instead, when the panel limit is a Plan-B override, we either omit
-// trafficLimitBytes (no original captured) or send the original whitelist limit
-// captured at block time (st.WLOriginalLimit), so the bot keeps a sane number.
+// For basic-only access the panel limit is 0, which Remnawave treats as
+// unlimited. Forward that value as-is so the bot does not see a fake technical
+// limit. For old rows that still carry the former Plan-B override, fall back to
+// the original whitelist limit captured at block time.
 func (e *Engine) relayUserModifiedActive(ctx context.Context, userUUID string) {
 	if e.relay == nil || !e.relay.Enabled() {
 		return
@@ -69,12 +67,10 @@ func (e *Engine) relayUserModifiedActive(ctx context.Context, userUUID string) {
 		"activeInternalSquads": remnawave.SquadsOf(panel),
 	}
 
-	// Effective limit to report to the bot. If the panel currently shows our
-	// Plan-B override, fall back to the original whitelist limit we captured at
-	// block time; if neither is available, omit the field rather than leak the
-	// inflated value.
+	// Effective limit to report to the bot. Zero is a real Remnawave value
+	// meaning unlimited; only the old Plan-B override is hidden.
 	effectiveLimit := effectiveLimitForRelay(panel, e.storeLimit(ctx, userUUID))
-	if effectiveLimit > 0 {
+	if effectiveLimit >= 0 {
 		data["trafficLimitBytes"] = effectiveLimit
 	}
 	if panel.UsedBytes > 0 {
@@ -99,14 +95,13 @@ func (e *Engine) storeLimit(ctx context.Context, userUUID string) int64 {
 }
 
 // effectiveLimitForRelay decides which trafficLimitBytes value to report to the
-// bot. If the panel currently shows our Plan-B override (~1 EiB), reporting it
-// would make the cabinet display ~1 million GB; instead fall back to the
-// original whitelist limit captured at block time. If neither is available,
-// returns 0 (caller then omits the field).
+// bot. Zero is meaningful ("unlimited") and passes through. If the panel still
+// shows the old Plan-B override (~1 EiB), reporting it would make the cabinet
+// display ~1 million GB; instead fall back to the original whitelist limit, or
+// 0 if no original is available.
 func effectiveLimitForRelay(panel *remnawave.User, originalLimit int64) int64 {
-	if panel.DataLimitBytes > 0 && !isPlanBLimit(panel.DataLimitBytes) {
+	if !isPlanBLimit(panel.DataLimitBytes) {
 		return panel.DataLimitBytes
 	}
-	// Panel holds the Plan-B override (or is 0); use the original if we have it.
 	return originalLimit
 }

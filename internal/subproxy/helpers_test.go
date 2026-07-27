@@ -64,3 +64,23 @@ func TestBase64Title(t *testing.T) {
 		t.Fatalf("decoded = %q, want %q", string(dec), "KabebaVPN 🦉")
 	}
 }
+
+func TestUnlimitedUserinfo(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"empty", "", "upload=0; download=0; total=0"},
+		{"replace_total", "upload=12; download=34; total=999; expire=123", "upload=12; download=34; total=0; expire=123"},
+		{"append_total", "upload=12; download=34; expire=123", "upload=12; download=34; expire=123; total=0"},
+		{"case_insensitive", "upload=12; TOTAL=999; expire=123", "upload=12; total=0; expire=123"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := unlimitedUserinfo(tc.in); got != tc.want {
+				t.Fatalf("unlimitedUserinfo(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
