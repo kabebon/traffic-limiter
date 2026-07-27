@@ -3,7 +3,6 @@ package engine
 import (
 	"context"
 	"fmt"
-	"time"
 
 	"github.com/traffic-limiter/internal/remnawave"
 	"github.com/traffic-limiter/internal/state"
@@ -15,15 +14,11 @@ import (
 func (e *Engine) onUserLimited(ctx context.Context, userUUID string) error {
 	return e.withUserLock(userUUID, func() error {
 		return e.store.Update(ctx, userUUID, e.cfg.BasicDefaultLimitBytes, func(st *state.UserState) error {
-			if st.WLState == state.WLBlocked {
-				// Already blocked; nothing to do (idempotency).
-				return nil
-			}
 			now := nowUnix()
 
 			if st.WLState == state.WLActive {
-				// Enter grace. We capture the panel-side data_limit_bytes at this
-				// moment so we know when "grace over-limit" is reached.
+				// Capture the panel-side paid limit/strategy before switching the
+				// user to basic-only unlimited access.
 				panel, _ := e.client.GetUser(ctx, userUUID)
 				overLimit := int64(0)
 				originalLimit := int64(0)
@@ -33,32 +28,20 @@ func (e *Engine) onUserLimited(ctx context.Context, userUUID string) error {
 					originalStrategy = panel.TrafficLimitStrategy
 					overLimit = originalLimit + e.cfg.WhitelistGraceOverlimitMB*1024*1024
 				}
-				graceUntil := now + int64(e.cfg.WhitelistGraceWindow.Seconds())
-				if graceUntil == now {
-					// Window disabled → block immediately.
-					return e.blockWhitelist(ctx, st, panel, now)
-				}
-				st.WLState = state.WLGrace
-				st.WLGraceUntil = nullableInt64(graceUntil)
 				st.WLOverLimit = nullableInt64(overLimit)
 				if originalLimit > 0 {
 					st.WLOriginalLimit = nullableInt64(originalLimit)
 				}
 				st.WLOriginalStrategy = nullableString(string(originalStrategy))
 				st.LastWLLimitedAt = nullableInt64(now)
-				e.log.Info("whitelist: entered grace",
-					"user", userUUID, "grace_until", time.Unix(graceUntil, 0).Format(time.RFC3339),
-					"over_limit_bytes", overLimit)
-				return nil
-			}
-
-			// st.WLState == WLGrace — this is a re-fire during grace. Decide whether
-			// grace is over (window elapsed OR over-limit exceeded) and block.
-			if e.shouldEndGrace(st, now) {
-				panel, _ := e.client.GetUser(ctx, userUUID)
 				return e.blockWhitelist(ctx, st, panel, now)
 			}
-			return nil
+
+			// Re-fires in grace/blocked are treated as repair attempts. This keeps
+			// already-limited users moving to basic-only even if an earlier run
+			// recorded state but failed to patch the panel.
+			panel, _ := e.client.GetUser(ctx, userUUID)
+			return e.blockWhitelist(ctx, st, panel, now)
 		})
 	})
 }
@@ -74,9 +57,9 @@ func (e *Engine) shouldEndGrace(st *state.UserState, now int64) bool {
 	return false
 }
 
-// blockWhitelist removes the whitelist squad, sets a very large data_limit with
-// NO_RESET (Plan B) so the panel does not re-enter LIMITED on the next stat
-// tick, and flips local state to blocked.
+// blockWhitelist removes the whitelist squad, sets trafficLimitBytes=0 with
+// NO_RESET so the panel treats the remaining basic-only access as unlimited,
+// and flips local state to blocked.
 func (e *Engine) blockWhitelist(ctx context.Context, st *state.UserState, panel *remnawave.User, now int64) error {
 	userUUID := st.UserUUID
 	if panel == nil {
@@ -95,14 +78,15 @@ func (e *Engine) blockWhitelist(ctx context.Context, st *state.UserState, panel 
 		st.WLOriginalStrategy = nullableString(string(panel.TrafficLimitStrategy))
 	}
 
-	// Build new squad list: drop whitelist, keep everything else (incl. basic).
-	newSquads := dropSquads(remnawave.SquadsOf(panel), e.cfg.WhitelistSquadUUID)
+	// Build new squad list: drop whitelist and force basic in. The bot may
+	// have created/renewed the user with only the paid whitelist squad.
+	newSquads := ensureSquads(dropSquads(remnawave.SquadsOf(panel), e.cfg.WhitelistSquadUUID), e.cfg.BasicSquadUUID)
 
-	huge := int64(1) << 50 // ~1 EiB — effectively unlimited, prevents auto-LIMITED
+	unlimited := int64(0)
 	if err := e.callPatch(ctx, userUUID,
 		statusPtr(remnawave.StatusActive),
 		squadsPtr(newSquads),
-		int64Ptr(huge),
+		int64Ptr(unlimited),
 		strategyPtr(remnawave.NoReset),
 	); err != nil {
 		return fmt.Errorf("blockWhitelist: patch: %w", err)

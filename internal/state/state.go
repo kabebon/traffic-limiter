@@ -258,3 +258,32 @@ func (s *Store) IterNonBlockedWLUsers(ctx context.Context, fn func(*UserState) e
 	}
 	return rows.Err()
 }
+
+// IterWLUsers visits every known user with a whitelist orchestration state.
+func (s *Store) IterWLUsers(ctx context.Context, fn func(*UserState) error) error {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT user_uuid, wl_state, wl_grace_until, wl_original_limit, wl_original_strategy,
+		       wl_over_limit, basic_used_bytes, basic_limit_bytes, basic_state,
+		       last_wl_limited_at, last_basic_limited_at, last_reconciled_at,
+		       created_at, updated_at
+		FROM user_state WHERE wl_state IN ('active','grace','blocked')`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var st UserState
+		if err := rows.Scan(
+			&st.UserUUID, &st.WLState, &st.WLGraceUntil, &st.WLOriginalLimit, &st.WLOriginalStrategy,
+			&st.WLOverLimit, &st.BasicUsedBytes, &st.BasicLimitBytes, &st.BasicState,
+			&st.LastWLLimitedAt, &st.LastBasicLimitedAt, &st.LastReconciledAt,
+			&st.CreatedAt, &st.UpdatedAt,
+		); err != nil {
+			return err
+		}
+		if err := fn(&st); err != nil {
+			return err
+		}
+	}
+	return rows.Err()
+}

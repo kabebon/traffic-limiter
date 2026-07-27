@@ -40,8 +40,8 @@ func TestShouldRestoreWhitelist_ManualReset(t *testing.T) {
 }
 
 func TestShouldRestoreWhitelist_PlanBOverrideIgnored(t *testing.T) {
-	// Critical: our own Plan-B override set ~1 EiB limit. This MUST NOT trigger
-	// a restore (otherwise whitelist unblocks instantly and meaninglessly).
+	// Compatibility: old blocked users may still have the former Plan-B limit.
+	// This MUST NOT trigger a restore.
 	st := &state.UserState{
 		WLState:         state.WLBlocked,
 		WLOriginalLimit: state.NullInt64{Int64: 10 * 1024 * 1024 * 1024, Valid: true},
@@ -52,6 +52,23 @@ func TestShouldRestoreWhitelist_PlanBOverrideIgnored(t *testing.T) {
 	}
 	if shouldRestoreWhitelist(st, panel) {
 		t.Error("Plan-B override must NOT trigger restore")
+	}
+}
+
+func TestShouldRestoreWhitelist_ZeroLimitBasicOnlyIgnored(t *testing.T) {
+	// Current behavior: after whitelist is cut off we set trafficLimitBytes=0
+	// because Remnawave treats it as unlimited for the remaining basic squad.
+	// That user.modified must not restore whitelist by itself.
+	st := &state.UserState{
+		WLState:         state.WLBlocked,
+		WLOriginalLimit: state.NullInt64{Int64: 10 * 1024 * 1024 * 1024, Valid: true},
+	}
+	panel := &remnawave.User{
+		DataLimitBytes: 0,
+		UsedBytes:      0,
+	}
+	if shouldRestoreWhitelist(st, panel) {
+		t.Error("trafficLimitBytes=0 basic-only state must NOT trigger restore")
 	}
 }
 
@@ -102,23 +119,16 @@ func TestShouldRestoreWhitelist_AdminRestoredSaneLimit(t *testing.T) {
 	}
 }
 
-// Sanity: the ceiling used in modified.go matches what we test against.
+// Sanity: the compatibility ceiling used in modified.go matches what we test
+// against for old Plan-B rows.
 func TestPlanBLimitCeilingValue(t *testing.T) {
 	if planBLimitCeiling != int64(1)<<50 {
 		t.Fatalf("planBLimitCeiling drifted: %d", planBLimitCeiling)
 	}
-	// And the Plan-B override set in whitelist.go is 1<<50 (same ceiling),
-	// so values >= ceiling are treated as override.
-	if (int64(1) << 50) >= planBLimitCeiling {
-		// ok
-	} else {
-		t.Fatal("planB override must be >= ceiling")
-	}
 }
 
-// TestEffectiveLimitForRelay verifies that the relay never forwards the Plan-B
-// override (~1 EiB) to the bot, which would otherwise show ~1 million GB in the
-// cabinet. It falls back to the original whitelist limit, or 0 if unknown.
+// TestEffectiveLimitForRelay verifies that relay forwards trafficLimitBytes=0
+// as a real unlimited value, but still hides the old Plan-B override.
 func TestEffectiveLimitForRelay(t *testing.T) {
 	planB := int64(1) << 50 // Plan-B override
 	original := int64(100 * 1024 * 1024 * 1024)
@@ -132,7 +142,7 @@ func TestEffectiveLimitForRelay(t *testing.T) {
 		{"plan_b_falls_back_to_original", planB, original, original},
 		{"plan_b_no_original_returns_zero", planB, 0, 0},
 		{"sane_panel_limit_passes_through", original, original, original},
-		{"zero_panel_uses_original", 0, original, original},
+		{"zero_panel_passes_through", 0, original, 0},
 		{"zero_panel_no_original_zero", 0, 0, 0},
 	}
 	for _, tc := range cases {

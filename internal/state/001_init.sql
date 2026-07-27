@@ -3,7 +3,7 @@ CREATE TABLE IF NOT EXISTS user_state (
     user_uuid              TEXT PRIMARY KEY,
     wl_state               TEXT NOT NULL DEFAULT 'active',   -- active | grace | blocked
     wl_grace_until         INTEGER,                          -- unix seconds
-    wl_original_limit      INTEGER,                          -- saved data_limit_bytes before Plan-B override
+    wl_original_limit      INTEGER,                          -- saved paid whitelist data_limit_bytes
     wl_original_strategy   TEXT,                             -- saved traffic_limit_strategy
     wl_over_limit          INTEGER,                          -- data_limit_bytes at which grace started
     basic_used_bytes       INTEGER NOT NULL DEFAULT 0,

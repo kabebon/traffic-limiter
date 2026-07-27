@@ -13,10 +13,8 @@ import (
 // the bedolaga bot's "докупка трафика" button, which PATCHes trafficLimitBytes
 // up and triggers a user.modified webhook — but NOT a user.traffic_reset one).
 //
-// It must NOT unblock whitelist just because the panel reports some limit —
-// our own Plan-B override set a huge trafficLimitBytes (so the panel wouldn't
-// re-enter LIMITED), and that would match "used < limit" trivially. The
-// correct signal is one of:
+// It must NOT unblock whitelist just because the panel reports unlimited
+// trafficLimitBytes=0 for basic-only access. The correct signal is one of:
 //
 //   1. The user's CURRENT usedTrafficBytes is below their ORIGINAL (pre-block)
 //      limit — meaning the bot reset their traffic or the cycle rolled over.
@@ -67,8 +65,6 @@ func shouldRestoreWhitelist(st *state.UserState, panel *remnawave.User) bool {
 	currentUsed := panel.UsedBytes
 
 	// Signal 1: limit grew beyond the original — user bought more traffic.
-	// (Plan-B override sets a ~1 EiB limit; this comparison must use the
-	// ORIGINAL limit, not the inflated one.)
 	if originalLimit > 0 && currentLimit > originalLimit && currentLimit < planBLimitCeiling {
 		return true
 	}
@@ -77,13 +73,10 @@ func shouldRestoreWhitelist(st *state.UserState, panel *remnawave.User) bool {
 	// (bot's "сброс трафика") or the strategy cycle rolled over. In both cases
 	// the user has usable whitelist quota again.
 	//
-	// We additionally require the panel's CURRENT limit not to be our own
-	// Plan-B override (>= ceiling). Otherwise we'd act on a transient state
-	// where the panel still holds the inflated limit we set at block time and
-	// the "used < original" comparison is just an artifact. Real resets also
-	// fire user.traffic_reset, which is handled separately — this signal is a
-	// fallback for cases where only user.modified arrives.
-	if originalLimit > 0 && currentUsed < originalLimit && !isPlanBLimit(currentLimit) {
+	// We additionally require the panel's CURRENT limit to be positive and not
+	// our old Plan-B override. A current limit of 0 means "basic-only unlimited"
+	// and can be produced by our own block patch, so it is not a restore signal.
+	if originalLimit > 0 && currentLimit > 0 && currentUsed < originalLimit && !isPlanBLimit(currentLimit) {
 		return true
 	}
 
@@ -99,10 +92,10 @@ func shouldRestoreWhitelist(st *state.UserState, panel *remnawave.User) bool {
 	return false
 }
 
-// restoreWhitelist puts the whitelist squad back and undoes the Plan-B override
-// (restoring the original limit + strategy captured at block time). Unlike the
-// full reset path, this does NOT call reset-traffic — the panel already has
-// the right usedTrafficBytes (the whole point of докупка is to keep history).
+// restoreWhitelist puts the whitelist squad back and restores the paid limit +
+// strategy captured at block time. Unlike the full reset path, this does NOT
+// call reset-traffic — the panel already has the right usedTrafficBytes (the
+// whole point of докупка is to keep history).
 func (e *Engine) restoreWhitelist(ctx context.Context, st *state.UserState, panel *remnawave.User) error {
 	userUUID := st.UserUUID
 
@@ -145,9 +138,8 @@ func (e *Engine) restoreWhitelist(ctx context.Context, st *state.UserState, pane
 	return nil
 }
 
-// planBLimitCeiling is the threshold above which we assume a trafficLimitBytes
-// value is our own Plan-B override rather than a real user-facing limit.
-// Plan-B sets ~1 EiB (1<<60); any real limit is many orders of magnitude lower.
+// planBLimitCeiling is kept for compatibility with users blocked by older
+// versions that used a huge Plan-B override instead of trafficLimitBytes=0.
 const planBLimitCeiling int64 = 1 << 50
 
 // isPlanBLimit reports whether v looks like our Plan-B override rather than a

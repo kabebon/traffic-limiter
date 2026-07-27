@@ -40,7 +40,8 @@ type Config struct {
 	// WhitelistSquadUUID is the UUID of the Internal Squad that exposes the tariffed "whitelist" nodes.
 	WhitelistSquadUUID string
 
-	// BasicNodeUUIDs is the list of node UUIDs whose per-user traffic feeds the basic counter.
+	// BasicNodeUUIDs is the optional list of node UUIDs whose per-user traffic
+	// feeds the basic counter. Empty disables basic traffic accounting.
 	BasicNodeUUIDs []string
 
 	// WhitelistGraceWindow is how long a user stays in "grace" after hitting the whitelist limit.
@@ -123,7 +124,7 @@ func FromEnv() (Config, error) {
 		BasicSquadUUID:           getenv("BASIC_SQUAD_UUID"),
 		WhitelistSquadUUID:       getenv("WHITELIST_SQUAD_UUID"),
 		BasicNodeUUIDs:           splitCSV(getenv("BASIC_NODE_UUIDS")),
-		WhitelistGraceWindow:     getDurationDefault("WHITELIST_GRACE_WINDOW_SEC", 3600) * time.Second,
+		WhitelistGraceWindow:     getDurationDefault("WHITELIST_GRACE_WINDOW_SEC", 0) * time.Second,
 		WhitelistGraceOverlimitMB: getInt64Default("WHITELIST_GRACE_OVERLIMIT_MB", 50),
 		BasicPollInterval:        getDurationDefault("BASIC_POLL_INTERVAL_SEC", 90) * time.Second,
 		BasicDefaultLimitBytes:   getInt64Default("BASIC_DEFAULT_LIMIT_GB", 20) * 1024 * 1024 * 1024,
@@ -159,9 +160,6 @@ func FromEnv() (Config, error) {
 	}
 	if c.WhitelistSquadUUID == "" {
 		missing = append(missing, "WHITELIST_SQUAD_UUID")
-	}
-	if len(c.BasicNodeUUIDs) == 0 {
-		missing = append(missing, "BASIC_NODE_UUIDS")
 	}
 	if len(missing) > 0 {
 		return Config{}, fmt.Errorf("missing required env vars: %s", strings.Join(missing, ", "))

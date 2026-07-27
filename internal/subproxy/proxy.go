@@ -148,6 +148,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if title != "" {
 		w.Header().Set("Profile-Title", percentEncode(title))
+		w.Header().Set("Subscription-Userinfo", unlimitedUserinfo(resp.Header.Get("Subscription-Userinfo")))
 	}
 
 	w.WriteHeader(resp.StatusCode)
