@@ -195,9 +195,10 @@ func renderPlaceholders(s, ui string) string {
 	return r.Replace(s)
 }
 
-func contains(slice []string, val string) bool {
+func containsIgnoreCase(slice []string, val string) bool {
+	cleanVal := strings.ToLower(strings.TrimSpace(val))
 	for _, s := range slice {
-		if s == val {
+		if strings.ToLower(strings.TrimSpace(s)) == cleanVal {
 			return true
 		}
 	}

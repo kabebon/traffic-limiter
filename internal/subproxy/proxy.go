@@ -188,21 +188,35 @@ func (p *Proxy) overlayForShort(ctx context.Context, short string) (title, annou
 		// Unknown / new user — leave the panel title alone, apply active announce if configured.
 		return "", p.announceOn
 	}
-	// 1) First check local state store if record exists and is marked grace or blocked.
-	if st, _ := p.store.Get(ctx, userUUID, 0); st != nil {
+	st, _ := p.store.Get(ctx, userUUID, 0)
+	wlState := state.WLActive
+	if st != nil {
+		wlState = st.WLState
 		switch st.WLState {
 		case state.WLGrace, state.WLBlocked:
+			if p.log != nil {
+				p.log.Debug("subproxy: overlay matched local state", "short", short, "wl_state", st.WLState)
+			}
 			return p.titleOff, p.announceOff
 		}
 	}
-	// 2) Fallback to actual Remnawave panel status & squad membership:
-	// If a user exhausted quota before local state was initialized or a webhook was lost,
-	// their panel status is LIMITED or they lack the whitelist squad while having basic nodes.
+	// Fallback to actual Remnawave panel status & squad membership:
+	// When traffic-limiter blocks whitelist, the user's panel status is switched back to ACTIVE (so basic nodes work)
+	// and WHITELIST_SQUAD_UUID is detached from activeInternalSquads.
 	if strings.EqualFold(status, string(remnawave.StatusLimited)) {
+		if p.log != nil {
+			p.log.Debug("subproxy: overlay matched limited panel status", "short", short)
+		}
 		return p.titleOff, p.announceOff
 	}
-	if p.wlSquad != "" && !contains(squads, p.wlSquad) && (p.basicSquad == "" || contains(squads, p.basicSquad)) {
+	if p.wlSquad != "" && !containsIgnoreCase(squads, p.wlSquad) {
+		if p.log != nil {
+			p.log.Debug("subproxy: overlay matched detached whitelist squad", "short", short, "squads", squads, "wl_squad", p.wlSquad)
+		}
 		return p.titleOff, p.announceOff
+	}
+	if p.log != nil {
+		p.log.Debug("subproxy: overlay matched active whitelist", "short", short, "wl_state", wlState, "squads", squads)
 	}
 	return "", p.announceOn
 }
