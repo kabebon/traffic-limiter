@@ -10,18 +10,68 @@ import (
 // GetUser returns the current state of a user. Reads the userTraffic block
 // to populate UsedBytes.
 func (c *Client) GetUser(ctx context.Context, uuid string) (*User, error) {
+	return c.getUserByPath(ctx, "/api/users/"+uuid)
+}
+
+// FindUserByShortUUID resolves a short UUID (the public subscription id, e.g.
+// "Eg_ShWCVXs1Uhx1F") to the full user via the panel's /api/users?search=
+// endpoint. Used by the subproxy resolver when /api/sub/{short}/info does not
+// expose the full user uuid (some panel versions only return shortUuid).
+// Returns the first matching ACTIVE/LIMITED/EXPIRED user whose shortUuid
+// matches; nil if nothing found.
+func (c *Client) FindUserByShortUUID(ctx context.Context, short string) (*User, error) {
+	if short == "" {
+		return nil, nil
+	}
+	var w struct {
+		Response []json.RawMessage `json:"response"`
+		Data     []json.RawMessage `json:"data"`
+		Users    []json.RawMessage `json:"users"`
+	}
+	path := fmt.Sprintf("/api/users?search=%s&limit=10", short)
+	if err := c.do(ctx, http.MethodGet, path, nil, &w); err != nil {
+		return nil, err
+	}
+	items := w.Response
+	if len(w.Data) > 0 {
+		items = w.Data
+	} else if len(w.Users) > 0 {
+		items = w.Users
+	}
+	for _, raw := range items {
+		u, err := decodeUser(raw)
+		if err != nil || u == nil || u.UUID == "" {
+			continue
+		}
+		// Confirm the short match on the parsed object to avoid collisions
+		// (search is substring-based on the panel side).
+		var probe struct {
+			ShortUUID string `json:"shortUuid"`
+		}
+		_ = json.Unmarshal(raw, &probe)
+		if probe.ShortUUID == "" || probe.ShortUUID == short {
+			return u, nil
+		}
+	}
+	return nil, nil
+}
+
+// getUserByPath fetches a single user from an arbitrary /api/users... path and
+// decodes the response envelope. Shared by GetUser (by uuid) and the subproxy
+// resolver fallback.
+func (c *Client) getUserByPath(ctx context.Context, path string) (*User, error) {
 	var w struct {
 		Response json.RawMessage `json:"response"`
 	}
-	if err := c.do(ctx, http.MethodGet, "/api/users/"+uuid, nil, &w); err != nil {
+	if err := c.do(ctx, http.MethodGet, path, nil, &w); err != nil {
 		return nil, err
 	}
 	if len(w.Response) == 0 {
-		return nil, fmt.Errorf("get user %s: empty response", uuid)
+		return nil, fmt.Errorf("get user %s: empty response", path)
 	}
 	u, err := decodeUser(w.Response)
 	if err != nil {
-		return nil, fmt.Errorf("decode user %s: %w", uuid, err)
+		return nil, fmt.Errorf("decode user %s: %w", path, err)
 	}
 	return u, nil
 }

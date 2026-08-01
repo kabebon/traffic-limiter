@@ -120,22 +120,28 @@ func (r *Resolver) fetchFromPanel(ctx context.Context, short string) (string, bo
 	body, err := r.client.RawGet(ctx, "/api/sub/"+short+"/info")
 	if err != nil {
 		r.log.Debug("resolver: info fetch failed", "short", short, "err", err)
-		return "", false
+		// Fall through to the short-uuid search fallback below — the /info
+		// endpoint is slow/unreliable on some panel versions, but the search
+		// endpoint reliably resolves short → full uuid.
+	} else {
+		var env struct {
+			Response json.RawMessage `json:"response"`
+		}
+		if err := json.Unmarshal(body, &env); err == nil && len(env.Response) > 0 {
+			// Probe known shapes for the user uuid.
+			if uuid := probeUserUUID(env.Response); uuid != "" {
+				return uuid, true
+			}
+		}
 	}
 
-	var env struct {
-		Response json.RawMessage `json:"response"`
+	// Fallback: some panel versions omit `uuid` from /info and only expose
+	// `shortUuid`. Resolve via the search endpoint instead.
+	if u, err := r.client.FindUserByShortUUID(ctx, short); err == nil && u != nil && u.UUID != "" {
+		r.log.Debug("resolver: resolved via search fallback", "short", short, "uuid", u.UUID)
+		return u.UUID, true
 	}
-	if err := json.Unmarshal(body, &env); err != nil || len(env.Response) == 0 {
-		return "", false
-	}
-
-	// Probe known shapes for the user uuid.
-	uuid := probeUserUUID(env.Response)
-	if uuid == "" {
-		return "", false
-	}
-	return uuid, true
+	return "", false
 }
 
 // fetchStatus loads the panel-side user status. Returns "" on any failure
