@@ -57,6 +57,8 @@ type Proxy struct {
 	failoverMessages []string
 	// failoverTitle is the branded Profile-Title for the rescue response.
 	failoverTitle string
+	wlSquad       string
+	basicSquad    string
 }
 
 // New builds a proxy. titleOn/titleOff/titleExp are the profile-title strings.
@@ -75,6 +77,8 @@ func New(cfg config.Config, client *remnawave.Client, store *state.Store, log *s
 		failover:         cfg.FailoverConfig,
 		failoverMessages: cfg.FailoverMessages,
 		failoverTitle:    cfg.FailoverTitle,
+		wlSquad:          cfg.WhitelistSquadUUID,
+		basicSquad:       cfg.BasicSquadUUID,
 		panelBase:        strings.TrimRight(cfg.PanelURL, "/"),
 		http:             &http.Client{Timeout: cfg.HTTPTimeout},
 	}
@@ -179,21 +183,28 @@ func (p *Proxy) overlayForShort(ctx context.Context, short string) (title, annou
 	if short == "" {
 		return "", p.announceOn
 	}
-	userUUID, _, ok := p.resolver.ResolveWithStatus(ctx, short)
+	userUUID, status, squads, ok := p.resolver.ResolveWithStatus(ctx, short)
 	if !ok {
 		// Unknown / new user — leave the panel title alone, apply active announce if configured.
 		return "", p.announceOn
 	}
-	st, _ := p.store.Get(ctx, userUUID, 0)
-	if st == nil {
-		return "", p.announceOn
+	// 1) First check local state store if record exists and is marked grace or blocked.
+	if st, _ := p.store.Get(ctx, userUUID, 0); st != nil {
+		switch st.WLState {
+		case state.WLGrace, state.WLBlocked:
+			return p.titleOff, p.announceOff
+		}
 	}
-	switch st.WLState {
-	case state.WLGrace, state.WLBlocked:
+	// 2) Fallback to actual Remnawave panel status & squad membership:
+	// If a user exhausted quota before local state was initialized or a webhook was lost,
+	// their panel status is LIMITED or they lack the whitelist squad while having basic nodes.
+	if strings.EqualFold(status, string(remnawave.StatusLimited)) {
 		return p.titleOff, p.announceOff
-	default:
-		return "", p.announceOn
 	}
+	if p.wlSquad != "" && !contains(squads, p.wlSquad) && (p.basicSquad == "" || contains(squads, p.basicSquad)) {
+		return p.titleOff, p.announceOff
+	}
+	return "", p.announceOn
 }
 
 func copyHeaders(dst, src http.Header) {

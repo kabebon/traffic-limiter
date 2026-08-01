@@ -194,3 +194,12 @@ func renderPlaceholders(s, ui string) string {
 	r := strings.NewReplacer(replacements...)
 	return r.Replace(s)
 }
+
+func contains(slice []string, val string) bool {
+	for _, s := range slice {
+		if s == val {
+			return true
+		}
+	}
+	return false
+}

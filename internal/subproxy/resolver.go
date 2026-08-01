@@ -37,10 +37,10 @@ type Resolver struct {
 type cacheEntry struct {
 	userUUID string
 	expires  time.Time
-	// status is the panel-side user status, refreshed independently of the
-	// uuid mapping. statusExpires may be zero (never fetched); an empty status
-	// means "unknown" (treated as not-expired by the caller).
+	// status and squads are the panel-side user status and squad list, refreshed
+	// independently of the uuid mapping.
 	status        string
+	squads        []string
 	statusExpires time.Time
 }
 
@@ -87,14 +87,14 @@ func (r *Resolver) Resolve(ctx context.Context, short string) (string, bool) {
 // ok=false means the panel did not have the subscription (404) or the request
 // failed. When ok=true but status=="" the status could not be determined
 // (panel error); callers must treat that as "not expired" (fail-safe).
-func (r *Resolver) ResolveWithStatus(ctx context.Context, short string) (string, string, bool) {
+func (r *Resolver) ResolveWithStatus(ctx context.Context, short string) (string, string, []string, bool) {
 	if short == "" {
-		return "", "", false
+		return "", "", nil, false
 	}
 
 	// Fast path: uuid mapping fresh AND status fresh.
-	if uuid, status, hit := r.cacheGetWithStatus(short); hit {
-		return uuid, status, true
+	if uuid, status, squads, hit := r.cacheGetWithStatus(short); hit {
+		return uuid, status, squads, true
 	}
 
 	// Resolve the uuid first (may be a warm cache hit or a panel fetch).
@@ -102,15 +102,15 @@ func (r *Resolver) ResolveWithStatus(ctx context.Context, short string) (string,
 	if !ok {
 		uuid, ok = r.fetchFromPanel(ctx, short)
 		if !ok {
-			return "", "", false
+			return "", "", nil, false
 		}
 		r.cachePut(short, uuid)
 	}
 
-	// Fetch status only when the cached one is stale.
-	status := r.fetchStatus(ctx, uuid)
-	r.cachePutStatus(short, status)
-	return uuid, status, true
+	// Fetch status and squads only when the cached one is stale.
+	status, squads := r.fetchStatusAndSquads(ctx, uuid)
+	r.cachePutStatusAndSquads(short, status, squads)
+	return uuid, status, squads, true
 }
 
 func (r *Resolver) fetchFromPanel(ctx context.Context, short string) (string, bool) {
@@ -146,13 +146,13 @@ func (r *Resolver) fetchFromPanel(ctx context.Context, short string) (string, bo
 
 // fetchStatus loads the panel-side user status. Returns "" on any failure
 // (caller treats unknown as not-expired).
-func (r *Resolver) fetchStatus(ctx context.Context, userUUID string) string {
+func (r *Resolver) fetchStatusAndSquads(ctx context.Context, userUUID string) (string, []string) {
 	panel, err := r.client.GetUser(ctx, userUUID)
 	if err != nil || panel == nil {
 		r.log.Debug("resolver: status fetch failed", "user", userUUID, "err", err)
-		return ""
+		return "", nil
 	}
-	return string(panel.Status)
+	return string(panel.Status), panel.ActiveInternalSquads.Strings()
 }
 
 // probeUserUUID tries multiple JSON paths for the user UUID, covering several
@@ -206,20 +206,20 @@ func (r *Resolver) cacheGet(short string) (string, bool) {
 // cacheGetWithStatus returns the uuid and status if BOTH are still fresh.
 // The third return is true only when a panel round-trip can be skipped
 // entirely (uuid fresh AND status fresh).
-func (r *Resolver) cacheGetWithStatus(short string) (string, string, bool) {
+func (r *Resolver) cacheGetWithStatus(short string) (string, string, []string, bool) {
 	if r.ttl == 0 {
-		return "", "", false
+		return "", "", nil, false
 	}
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	e, ok := r.byShort[short]
 	if !ok || time.Now().After(e.expires) {
-		return "", "", false
+		return "", "", nil, false
 	}
 	if !e.statusExpires.IsZero() && time.Now().Before(e.statusExpires) {
-		return e.userUUID, e.status, true
+		return e.userUUID, e.status, e.squads, true
 	}
-	return "", "", false
+	return "", "", nil, false
 }
 
 func (r *Resolver) cachePut(short, userUUID string) {
@@ -234,9 +234,7 @@ func (r *Resolver) cachePut(short, userUUID string) {
 	r.byShort[short] = e
 }
 
-// cachePutStatus updates only the status of an existing entry (creating one is
-// not useful without a uuid, so a missing entry is left alone).
-func (r *Resolver) cachePutStatus(short, status string) {
+func (r *Resolver) cachePutStatusAndSquads(short, status string, squads []string) {
 	if r.ttl == 0 {
 		return
 	}
@@ -247,6 +245,7 @@ func (r *Resolver) cachePutStatus(short, status string) {
 		return
 	}
 	e.status = status
+	e.squads = squads
 	e.statusExpires = time.Now().Add(r.ttl)
 	r.byShort[short] = e
 }
