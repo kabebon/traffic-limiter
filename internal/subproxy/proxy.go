@@ -27,7 +27,6 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
-	"strconv"
 	"strings"
 	"time"
 
@@ -133,12 +132,15 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// This is deliberately distinct from a whitelist quota exhaustion, which
 	// keeps basic nodes and is handled by the title overlay below.
 	if p.failover != "" && isExpiredByHeader(resp.Header) {
-		p.serveFailover(w)
+		p.serveFailover(w, resp.Header.Get("Subscription-Userinfo"))
 		return
 	}
 
 	short := extractShortUUID(r.URL.Path)
 	title, announce := p.overlayForShort(r.Context(), short)
+	userinfo := resp.Header.Get("Subscription-Userinfo")
+	title = renderPlaceholders(title, userinfo)
+	announce = renderPlaceholders(announce, userinfo)
 
 	// Copy upstream response headers. We drop the panel's profile-title (and
 	// Announce) only when we have our own status overlay; otherwise we forward
@@ -224,15 +226,15 @@ func sanitizeRequestHeaders(h http.Header) {
 // The profile-title is base64-encoded with the "base64:" prefix that the panel
 // uses — Happ/INCY render this cleanly (raw percent-encoding shows up as
 // mojibake in some clients).
-func (p *Proxy) serveFailover(w http.ResponseWriter) {
+func (p *Proxy) serveFailover(w http.ResponseWriter, userinfo string) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	if p.titleExp != "" {
-		w.Header().Set("Profile-Title", base64Title(p.titleExp))
+		w.Header().Set("Profile-Title", base64Title(renderPlaceholders(p.titleExp, userinfo)))
 	} else if p.failoverTitle != "" {
-		w.Header().Set("Profile-Title", base64Title(p.failoverTitle))
+		w.Header().Set("Profile-Title", base64Title(renderPlaceholders(p.failoverTitle, userinfo)))
 	}
 	if p.announceExp != "" {
-		w.Header().Set("Announce", base64Announce(p.announceExp))
+		w.Header().Set("Announce", base64Announce(renderPlaceholders(p.announceExp, userinfo)))
 	}
 	w.Header().Set("Profile-Update-Interval", "24")
 	w.WriteHeader(http.StatusOK)
@@ -265,16 +267,9 @@ func isExpiredByHeader(h http.Header) bool {
 	if ui == "" {
 		return false
 	}
-	for _, field := range strings.Split(ui, ";") {
-		field = strings.TrimSpace(field)
-		if !strings.HasPrefix(field, "expire=") {
-			continue
-		}
-		expire, err := strconv.ParseInt(strings.TrimPrefix(field, "expire="), 10, 64)
-		if err != nil || expire <= 0 {
-			return false
-		}
-		return expire < time.Now().Unix()
+	_, _, _, expire := parseUserinfo(ui)
+	if expire <= 0 {
+		return false
 	}
-	return false
+	return expire < time.Now().Unix()
 }

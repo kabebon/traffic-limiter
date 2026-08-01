@@ -481,3 +481,24 @@ func mkUIUnparsable() http.Header {
 	h.Set("Subscription-Userinfo", "upload=0; download=100; total=0; expire=abc")
 	return h
 }
+
+func TestRenderPlaceholders(t *testing.T) {
+	future := time.Now().Add(48 * time.Hour).Unix() // 2 days
+	ui := fmt.Sprintf("upload=1024; download=2048; total=1048576; expire=%d", future)
+
+	template := "Days left: {{DAYS_LEFT}} | Total: {{TOTAL_TRAFFIC}} | Exp: {{EXPIRE_DATE}}"
+	got := renderPlaceholders(template, ui)
+	if !strings.Contains(got, "Days left: 2") {
+		t.Errorf("want Days left: 2 in %q", got)
+	}
+	if !strings.Contains(got, "Total: 1 MB") {
+		t.Errorf("want Total: 1 MB in %q", got)
+	}
+
+	// Zero/unlimited expire
+	uiUnlim := "upload=0; download=0; total=0; expire=0"
+	gotUnlim := renderPlaceholders("Days left: {{DAYS_LEFT}}", uiUnlim)
+	if !strings.Contains(gotUnlim, "Days left: ∞") {
+		t.Errorf("want Days left: ∞ in %q", gotUnlim)
+	}
+}

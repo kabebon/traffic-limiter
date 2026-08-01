@@ -2,8 +2,12 @@ package subproxy
 
 import (
 	"encoding/base64"
+	"fmt"
+	"math"
 	"net/url"
+	"strconv"
 	"strings"
+	"time"
 )
 
 // extractShortUUID pulls the {shortUuid} segment out of any /sub/... path the
@@ -82,4 +86,111 @@ func unlimitedUserinfo(v string) string {
 		parts = append(parts, " total=0")
 	}
 	return strings.Join(parts, ";")
+}
+
+func parseUserinfo(ui string) (upload, download, total, expire int64) {
+	for _, field := range strings.Split(ui, ";") {
+		field = strings.TrimSpace(strings.ToLower(field))
+		if strings.HasPrefix(field, "upload=") {
+			upload, _ = strconv.ParseInt(strings.TrimPrefix(field, "upload="), 10, 64)
+		} else if strings.HasPrefix(field, "download=") {
+			download, _ = strconv.ParseInt(strings.TrimPrefix(field, "download="), 10, 64)
+		} else if strings.HasPrefix(field, "total=") {
+			total, _ = strconv.ParseInt(strings.TrimPrefix(field, "total="), 10, 64)
+		} else if strings.HasPrefix(field, "expire=") {
+			expire, _ = strconv.ParseInt(strings.TrimPrefix(field, "expire="), 10, 64)
+		}
+	}
+	return
+}
+
+func formatDaysLeft(expire int64) string {
+	if expire <= 0 {
+		return "∞"
+	}
+	secLeft := expire - time.Now().Unix()
+	if secLeft <= 0 {
+		return "0"
+	}
+	days := int(secLeft / 86400)
+	if days == 0 && secLeft > 0 {
+		days = 1
+	}
+	return strconv.Itoa(days)
+}
+
+func formatExpireDate(expire int64) string {
+	if expire <= 0 {
+		return "∞"
+	}
+	return time.Unix(expire, 0).Format("02.01.2006")
+}
+
+func formatBytes(b int64) string {
+	if b <= 0 {
+		return "0 B"
+	}
+	const unit = 1024
+	if b < unit {
+		return fmt.Sprintf("%d B", b)
+	}
+	div, exp := int64(unit), 0
+	for n := b / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	units := []string{"KB", "MB", "GB", "TB", "PB"}
+	if exp >= len(units) {
+		exp = len(units) - 1
+	}
+	val := float64(b) / float64(div)
+	if val == math.Trunc(val) {
+		return fmt.Sprintf("%.0f %s", val, units[exp])
+	}
+	return fmt.Sprintf("%.1f %s", val, units[exp])
+}
+
+func renderPlaceholders(s, ui string) string {
+	if s == "" || !strings.Contains(s, "{") {
+		return s
+	}
+	upload, download, total, expire := parseUserinfo(ui)
+
+	daysLeft := formatDaysLeft(expire)
+	expireDate := formatExpireDate(expire)
+	totalStr := "∞"
+	if total > 0 {
+		totalStr = formatBytes(total)
+	}
+	usedStr := formatBytes(upload + download)
+	leftStr := "∞"
+	if total > 0 {
+		left := total - (upload + download)
+		if left <= 0 {
+			leftStr = "0 B"
+		} else {
+			leftStr = formatBytes(left)
+		}
+	}
+
+	replacements := []string{
+		"{{DAYS_LEFT}}", daysLeft,
+		"{DAYS_LEFT}", daysLeft,
+		"{{EXPIRE_DATE}}", expireDate,
+		"{EXPIRE_DATE}", expireDate,
+		"{{TOTAL_TRAFFIC}}", totalStr,
+		"{TOTAL_TRAFFIC}", totalStr,
+		"{{TRAFFIC_TOTAL}}", totalStr,
+		"{TRAFFIC_TOTAL}", totalStr,
+		"{{USED_TRAFFIC}}", usedStr,
+		"{USED_TRAFFIC}", usedStr,
+		"{{TRAFFIC_USED}}", usedStr,
+		"{TRAFFIC_USED}", usedStr,
+		"{{LEFT_TRAFFIC}}", leftStr,
+		"{LEFT_TRAFFIC}", leftStr,
+		"{{TRAFFIC_LEFT}}", leftStr,
+		"{TRAFFIC_LEFT}", leftStr,
+	}
+	r := strings.NewReplacer(replacements...)
+	return r.Replace(s)
 }
