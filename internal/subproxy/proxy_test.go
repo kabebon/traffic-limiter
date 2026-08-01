@@ -185,6 +185,41 @@ func TestProxy_NoAnnounceForActive(t *testing.T) {
 	}
 }
 
+func TestProxy_AnnounceOverlayForActive(t *testing.T) {
+	dir := t.TempDir()
+	store, _ := state.Open(dir + "/test.sqlite")
+	defer store.Close()
+
+	userUUID := "u-active-ann"
+	mockPanel := startMockPanel(t, userUUID)
+	client := remnawave.New(mockPanel.URL, "tok", 5*time.Second)
+
+	announceText := "Добро пожаловать! Всё работает отлично."
+	cfg := config.Config{
+		PanelURL:         mockPanel.URL,
+		WLTitleActive:    "ACTIVE",
+		WLAnnounceActive: announceText,
+		SubproxyCacheTTL: 60 * time.Second,
+	}
+	p := New(cfg, client, store, nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/sub/shortact3", nil)
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	gotAnnounce := rec.Header().Get("Announce")
+	if gotAnnounce == "" {
+		t.Fatal("Announce header missing for active user with WLAnnounceActive configured")
+	}
+	dec, err := base64.StdEncoding.DecodeString(gotAnnounce)
+	if err != nil {
+		t.Fatalf("Announce not base64: %v (raw=%q)", err, gotAnnounce)
+	}
+	if string(dec) != announceText {
+		t.Fatalf("Announce decoded = %q, want %q", string(dec), announceText)
+	}
+}
+
 func TestProxy_ActiveTitlePassesThroughPanelTitle(t *testing.T) {
 	dir := t.TempDir()
 	store, _ := state.Open(dir + "/test.sqlite")
@@ -284,6 +319,42 @@ func TestProxy_FailoverOnExpired(t *testing.T) {
 	// The panel body must NOT leak through.
 	if strings.Contains(body, "should-not-appear") {
 		t.Fatalf("body must not contain the panel subscription body, got %q", body)
+	}
+}
+
+func TestProxy_FailoverAnnounceOnExpired(t *testing.T) {
+	dir := t.TempDir()
+	store, _ := state.Open(dir + "/test.sqlite")
+	defer store.Close()
+
+	userUUID := "u-expired-ann"
+	mockPanel := startMockPanelWithExpire(t, userUUID, time.Now().Add(-24*time.Hour).Unix())
+	client := remnawave.New(mockPanel.URL, "tok", 5*time.Second)
+
+	announceText := "Ваша подписка истекла. Пожалуйста, продлите доступ в личном кабинете."
+	cfg := config.Config{
+		PanelURL:          mockPanel.URL,
+		WLTitleExpired:    "EXPIRED-TITLE",
+		WLAnnounceExpired: announceText,
+		FailoverConfig:    "vless://rescue@example.com:443#RESCUE",
+		SubproxyCacheTTL:  60 * time.Second,
+	}
+	p := New(cfg, client, store, nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/sub/shortexpann", nil)
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	gotAnnounce := rec.Header().Get("Announce")
+	if gotAnnounce == "" {
+		t.Fatal("Announce header missing for expired user with WLAnnounceExpired configured")
+	}
+	dec, err := base64.StdEncoding.DecodeString(gotAnnounce)
+	if err != nil {
+		t.Fatalf("Announce not base64: %v (raw=%q)", err, gotAnnounce)
+	}
+	if string(dec) != announceText {
+		t.Fatalf("Announce decoded = %q, want %q", string(dec), announceText)
 	}
 }
 

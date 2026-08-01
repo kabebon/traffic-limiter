@@ -42,10 +42,12 @@ type Proxy struct {
 	store     *state.Store
 	resolver  *Resolver
 	log       *slog.Logger
-	titleOn   string // shown when wl_state == active
-	titleOff  string // shown when wl_state == grace/blocked
+	titleOn     string // shown when wl_state == active
+	titleOff    string // shown when wl_state == grace/blocked
+	announceOn  string // shown via Announce header when wl_state == active
 	announceOff string // longer status message shown via the Announce header
-	titleExp  string // shown when the subscription is expired by date
+	announceExp string // shown via Announce header when expired by date
+	titleExp    string // shown when the subscription is expired by date
 	panelBase string // base URL, e.g. https://panel.example.com
 	http      *http.Client
 	// failover is the single server link served to users whose subscription
@@ -67,7 +69,9 @@ func New(cfg config.Config, client *remnawave.Client, store *state.Store, log *s
 		log:              log,
 		titleOn:          cfg.WLTitleActive,
 		titleOff:         cfg.WLTitleBlocked,
+		announceOn:       cfg.WLAnnounceActive,
 		announceOff:      cfg.WLAnnounceBlocked,
+		announceExp:      cfg.WLAnnounceExpired,
 		titleExp:         cfg.WLTitleExpired,
 		failover:         cfg.FailoverConfig,
 		failoverMessages: cfg.FailoverMessages,
@@ -134,17 +138,16 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	short := extractShortUUID(r.URL.Path)
-	title, blocked := p.titleForShort(r.Context(), short)
+	title, announce := p.overlayForShort(r.Context(), short)
 
 	// Copy upstream response headers. We drop the panel's profile-title (and
 	// Announce) only when we have our own status overlay; otherwise we forward
-	// them untouched so the panel's branded title/message reaches the client
-	// for healthy users.
+	// them untouched so the panel's branded title/message reaches the client.
 	for k, vs := range resp.Header {
 		if title != "" && strings.EqualFold(k, "profile-title") {
 			continue
 		}
-		if blocked && p.announceOff != "" && strings.EqualFold(k, "announce") {
+		if announce != "" && strings.EqualFold(k, "announce") {
 			continue
 		}
 		for _, v := range vs {
@@ -155,40 +158,39 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Profile-Title", percentEncode(title))
 		w.Header().Set("Subscription-Userinfo", unlimitedUserinfo(resp.Header.Get("Subscription-Userinfo")))
 	}
-	// When the whitelist quota is exhausted, overlay a longer status message
-	// via the Announce header (base64-encoded, the format Happ/Clash render).
-	if blocked && p.announceOff != "" {
-		w.Header().Set("Announce", base64Announce(p.announceOff))
+	// Overlay a status message via the Announce header if configured for the state
+	// (base64-encoded, the format Happ/Clash render).
+	if announce != "" {
+		w.Header().Set("Announce", base64Announce(announce))
 	}
 
 	w.WriteHeader(resp.StatusCode)
 	_, _ = io.Copy(w, resp.Body)
 }
 
-// titleForShort resolves shortUuid → userUuid → wl_state and returns the
-// status title to overlay on the panel's profile-title, plus a flag telling
-// whether the whitelist quota is exhausted (in which case ServeHTTP also
-// overlays the Announce status message). Returns "" when the user is healthy,
-// so the panel's own (branded) title passes through untouched. Note:
-// expiry-by-date is handled in ServeHTTP via the rescue branch.
-func (p *Proxy) titleForShort(ctx context.Context, short string) (title string, blocked bool) {
+// overlayForShort resolves shortUuid → userUuid → wl_state and returns the
+// status title and announce message to overlay on the panel's headers. Returns
+// "" for title when the user is healthy so the panel's own (branded) title
+// passes through untouched. Note: expiry-by-date is handled in ServeHTTP via
+// the rescue branch.
+func (p *Proxy) overlayForShort(ctx context.Context, short string) (title, announce string) {
 	if short == "" {
-		return "", false
+		return "", p.announceOn
 	}
 	userUUID, _, ok := p.resolver.ResolveWithStatus(ctx, short)
 	if !ok {
-		// Unknown / new user — leave the panel title alone.
-		return "", false
+		// Unknown / new user — leave the panel title alone, apply active announce if configured.
+		return "", p.announceOn
 	}
 	st, _ := p.store.Get(ctx, userUUID, 0)
 	if st == nil {
-		return "", false
+		return "", p.announceOn
 	}
 	switch st.WLState {
 	case state.WLGrace, state.WLBlocked:
-		return p.titleOff, true
+		return p.titleOff, p.announceOff
 	default:
-		return "", false
+		return "", p.announceOn
 	}
 }
 
@@ -228,6 +230,9 @@ func (p *Proxy) serveFailover(w http.ResponseWriter) {
 		w.Header().Set("Profile-Title", base64Title(p.titleExp))
 	} else if p.failoverTitle != "" {
 		w.Header().Set("Profile-Title", base64Title(p.failoverTitle))
+	}
+	if p.announceExp != "" {
+		w.Header().Set("Announce", base64Announce(p.announceExp))
 	}
 	w.Header().Set("Profile-Update-Interval", "24")
 	w.WriteHeader(http.StatusOK)

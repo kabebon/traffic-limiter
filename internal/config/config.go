@@ -80,11 +80,16 @@ type Config struct {
 	WLTitleActive string
 	// WLTitleBlocked is the profile-title shown when whitelist is grace/blocked.
 	WLTitleBlocked string
+	// WLAnnounceActive is a status message shown to active users via the Announce
+	// response header that Happ/Clash-family clients render.
+	WLAnnounceActive string
 	// WLAnnounceBlocked is a longer (multi-line) status message shown to users
 	// whose whitelist quota is exhausted, via the Announce response header that
 	// Happ/Clash-family clients render in the subscription view. Plain text;
 	// "\n" separates lines. Empty disables the announce overlay.
 	WLAnnounceBlocked string
+	// WLAnnounceExpired is a status message shown to users whose subscription is expired by date.
+	WLAnnounceExpired string
 	// WLTitleExpired is the profile-title shown when the subscription is expired
 	// by date (panel status EXPIRED). In that case the subproxy serves the
 	// FailoverConfig instead of the panel subscription, so the user can still
@@ -141,7 +146,9 @@ func FromEnv() (Config, error) {
 		SubproxyCacheTTL:         getDurationDefault("SUBPROXY_CACHE_TTL_SEC", 300) * time.Second,
 		WLTitleActive:            getenvDefault("WL_TITLE_ACTIVE", "VPN · whitelist active"),
 		WLTitleBlocked:           getenvDefault("WL_TITLE_BLOCKED", "⚠️ Whitelist exhausted · basic nodes work"),
+		WLAnnounceActive:         getenv("WL_ANNOUNCE_ACTIVE"),
 		WLAnnounceBlocked:        getenv("WL_ANNOUNCE_BLOCKED"),
+		WLAnnounceExpired:        getenv("WL_ANNOUNCE_EXPIRED"),
 		WLTitleExpired:           getenvDefault("WL_TITLE_EXPIRED", ""),
 		FailoverConfig:           getenv("FAILOVER_CONFIG"),
 		FailoverMessages:         splitPipe(getenvDefault("FAILOVER_MESSAGES", "⌛ Подписка истекла|Свяжитесь с поддержкой|Сервер для связи")),
