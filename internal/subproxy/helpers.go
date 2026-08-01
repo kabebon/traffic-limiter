@@ -53,8 +53,10 @@ func base64Title(s string) string {
 
 // base64Announce encodes a status message with the "base64:" prefix so that
 // clients like Happ and INCY properly decode and render it in the subscription
-// view without showing raw base64 strings. Newlines in s are preserved.
+// view without showing raw base64 strings. Literal "\n" sequences are converted
+// to actual line breaks so messages can be written as a single line in .env files.
 func base64Announce(s string) string {
+	s = strings.ReplaceAll(s, "\\n", "\n")
 	return "base64:" + base64.StdEncoding.EncodeToString([]byte(s))
 }
 
