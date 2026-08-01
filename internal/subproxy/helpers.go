@@ -51,11 +51,11 @@ func base64Title(s string) string {
 	return "base64:" + base64.StdEncoding.EncodeToString([]byte(s))
 }
 
-// base64Announce encodes a status message the way the Remnawave panel encodes
-// its Announce header — plain base64 (no prefix). Happ/Clash-family clients
-// decode and render it in the subscription view. Newlines in s are preserved.
+// base64Announce encodes a status message with the "base64:" prefix so that
+// clients like Happ and INCY properly decode and render it in the subscription
+// view without showing raw base64 strings. Newlines in s are preserved.
 func base64Announce(s string) string {
-	return base64.StdEncoding.EncodeToString([]byte(s))
+	return "base64:" + base64.StdEncoding.EncodeToString([]byte(s))
 }
 
 // unlimitedUserinfo returns Subscription-Userinfo with total=0 while preserving

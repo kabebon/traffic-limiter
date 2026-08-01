@@ -148,7 +148,10 @@ func TestProxy_AnnounceOverlayForBlocked(t *testing.T) {
 	if gotAnnounce == "" {
 		t.Fatal("Announce header missing for blocked user")
 	}
-	dec, err := base64.StdEncoding.DecodeString(gotAnnounce)
+	if !strings.HasPrefix(gotAnnounce, "base64:") {
+		t.Fatalf("Announce missing base64: prefix: %q", gotAnnounce)
+	}
+	dec, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(gotAnnounce, "base64:"))
 	if err != nil {
 		t.Fatalf("Announce not base64: %v (raw=%q)", err, gotAnnounce)
 	}
@@ -211,7 +214,10 @@ func TestProxy_AnnounceOverlayForActive(t *testing.T) {
 	if gotAnnounce == "" {
 		t.Fatal("Announce header missing for active user with WLAnnounceActive configured")
 	}
-	dec, err := base64.StdEncoding.DecodeString(gotAnnounce)
+	if !strings.HasPrefix(gotAnnounce, "base64:") {
+		t.Fatalf("Announce missing base64: prefix: %q", gotAnnounce)
+	}
+	dec, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(gotAnnounce, "base64:"))
 	if err != nil {
 		t.Fatalf("Announce not base64: %v (raw=%q)", err, gotAnnounce)
 	}
@@ -349,7 +355,10 @@ func TestProxy_FailoverAnnounceOnExpired(t *testing.T) {
 	if gotAnnounce == "" {
 		t.Fatal("Announce header missing for expired user with WLAnnounceExpired configured")
 	}
-	dec, err := base64.StdEncoding.DecodeString(gotAnnounce)
+	if !strings.HasPrefix(gotAnnounce, "base64:") {
+		t.Fatalf("Announce missing base64: prefix: %q", gotAnnounce)
+	}
+	dec, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(gotAnnounce, "base64:"))
 	if err != nil {
 		t.Fatalf("Announce not base64: %v (raw=%q)", err, gotAnnounce)
 	}
